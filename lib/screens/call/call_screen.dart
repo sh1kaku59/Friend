@@ -68,12 +68,42 @@ class _CallScreenState extends State<CallScreen> {
   }
 
   void _setupLocalStream() async {
-    if (_localRenderer.srcObject != null) {
-      final localStream = _localRenderer.srcObject as MediaStream;
-      localStream.getTracks().forEach((track) {
-        track.stop();
-        track.enabled = false;
-      });
+    try {
+      // Tắt stream cũ nếu có
+      if (_localRenderer.srcObject != null) {
+        final localStream = _localRenderer.srcObject as MediaStream;
+        localStream.getTracks().forEach((track) {
+          track.stop();
+          track.enabled = false;
+        });
+      }
+
+      // Khởi tạo stream mới với camera và microphone
+      final Map<String, dynamic> mediaConstraints = {
+        'audio': true,
+        'video': {
+          'facingMode': 'user', // Sử dụng camera trước
+          'width': {'ideal': 1280},
+          'height': {'ideal': 720},
+        },
+      };
+
+      MediaStream stream = await navigator.mediaDevices.getUserMedia(
+        mediaConstraints,
+      );
+
+      // Gán stream vào renderer để hiển thị
+      _localRenderer.srcObject = stream;
+
+      // Cập nhật state để rebuild UI
+      if (mounted) {
+        setState(() {});
+      }
+    } catch (e) {
+      print('Error setting up local stream: $e');
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Không thể khởi tạo camera: $e')));
     }
   }
 
@@ -185,106 +215,188 @@ class _CallScreenState extends State<CallScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Nếu cuộc gọi đã được chấp nhận, hiển thị giao diện video call hiện tại
+    if (_isCallAccepted) {
+      return Scaffold(
+        backgroundColor: Colors.black,
+        body: SafeArea(
+          child: Stack(
+            children: [
+              // Giữ nguyên phần code hiển thị video call
+              RTCVideoView(
+                _remoteRenderer,
+                objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+              ),
+
+              // Local camera view (small frame)
+              Positioned(
+                top: 20,
+                right: 20,
+                child: Container(
+                  width: 120,
+                  height: 160,
+                  decoration: BoxDecoration(
+                    border: Border.all(color: Colors.white, width: 2),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: RTCVideoView(
+                    _localRenderer,
+                    mirror: true,
+                    objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                  ),
+                ),
+              ),
+
+              // Controls overlay
+              Positioned(
+                bottom: 40,
+                left: 0,
+                right: 0,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: [
+                    _buildControlButton(
+                      icon: _isMicMuted ? Icons.mic_off : Icons.mic,
+                      onPressed: _toggleMic,
+                    ),
+                    _buildControlButton(
+                      icon: Icons.call_end,
+                      backgroundColor: Colors.red,
+                      onPressed: _endCall,
+                    ),
+                    _buildControlButton(
+                      icon:
+                          _isVideoEnabled ? Icons.videocam : Icons.videocam_off,
+                      onPressed: _toggleVideo,
+                    ),
+                    _buildControlButton(
+                      icon: _isSpeakerOn ? Icons.volume_up : Icons.volume_off,
+                      onPressed: _toggleSpeaker,
+                    ),
+                  ],
+                ),
+              ),
+
+              // Caller info
+              Positioned(
+                top: 20,
+                left: 0,
+                right: 0,
+                child: Column(
+                  children: [
+                    CircleAvatar(
+                      radius: 30,
+                      backgroundImage: NetworkImage(widget.friendAvatarUrl),
+                    ),
+                    SizedBox(height: 8),
+                    Text(
+                      widget.friendName,
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+              // Call duration timer
+              if (_isCallAccepted)
+                Positioned(
+                  top: 80,
+                  left: 0,
+                  right: 0,
+                  child: Center(
+                    child: Text(
+                      _formatDuration(_callDuration),
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    // Giao diện màn hình đang gọi mới (khi chưa được chấp nhận)
     return Scaffold(
       backgroundColor: Colors.black,
       body: SafeArea(
-        child: Stack(
+        child: Column(
           children: [
-            // Video streams
-            RTCVideoView(
-              _remoteRenderer,
-              objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+            const SizedBox(height: 60),
+            // Avatar của người dùng
+            CircleAvatar(
+              radius: 50,
+              backgroundImage: NetworkImage(widget.friendAvatarUrl),
             ),
-
-            // Local camera view (small frame)
-            Positioned(
-              top: 20,
-              right: 20,
-              child: Container(
-                width: 120,
-                height: 160,
-                decoration: BoxDecoration(
-                  border: Border.all(color: Colors.white, width: 2),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: RTCVideoView(
-                  _localRenderer,
-                  mirror: true,
-                  objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
-                ),
+            const SizedBox(height: 24),
+            // Text "Đang gọi..."
+            const Text(
+              "Đang gọi...",
+              style: TextStyle(color: Colors.white70, fontSize: 24),
+            ),
+            const SizedBox(height: 16),
+            // Chỉ hiển thị tên người dùng
+            Text(
+              widget.friendName,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 28,
+                fontWeight: FontWeight.bold,
               ),
             ),
-
-            // Controls overlay
-            Positioned(
-              bottom: 40,
-              left: 0,
-              right: 0,
+            const Spacer(),
+            // Các nút điều khiển
+            Container(
+              margin: const EdgeInsets.only(bottom: 50),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                 children: [
-                  _buildControlButton(
-                    icon: _isMicMuted ? Icons.mic_off : Icons.mic,
-                    onPressed: _toggleMic,
-                  ),
-                  _buildControlButton(
-                    icon: Icons.call_end,
-                    backgroundColor: Colors.red,
-                    onPressed: _endCall,
-                  ),
-                  _buildControlButton(
-                    icon: _isVideoEnabled ? Icons.videocam : Icons.videocam_off,
-                    onPressed: _toggleVideo,
-                  ),
-                  _buildControlButton(
+                  _buildCallButton(
                     icon: _isSpeakerOn ? Icons.volume_up : Icons.volume_off,
+                    label: 'Loa ngoài',
                     onPressed: _toggleSpeaker,
                   ),
-                ],
-              ),
-            ),
-
-            // Caller info
-            Positioned(
-              top: 20,
-              left: 0,
-              right: 0,
-              child: Column(
-                children: [
-                  CircleAvatar(
-                    radius: 30,
-                    backgroundImage: NetworkImage(widget.friendAvatarUrl),
+                  _buildCallButton(
+                    icon: Icons.videocam,
+                    label: 'FaceTime',
+                    onPressed: _toggleVideo,
                   ),
-                  SizedBox(height: 8),
-                  Text(
-                    widget.friendName,
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold,
-                    ),
+                  _buildCallButton(
+                    icon: _isMicMuted ? Icons.mic_off : Icons.mic,
+                    label: 'Tắt tiếng',
+                    onPressed: _toggleMic,
                   ),
                 ],
               ),
             ),
-
-            // Call duration timer
-            if (_isCallAccepted)
-              Positioned(
-                top: 80,
-                left: 0,
-                right: 0,
-                child: Center(
-                  child: Text(
-                    _formatDuration(_callDuration),
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                    ),
+            // Nút kết thúc cuộc gọi
+            Padding(
+              padding: const EdgeInsets.only(bottom: 40),
+              child: GestureDetector(
+                onTap: _endCall,
+                child: Container(
+                  width: 70,
+                  height: 70,
+                  decoration: const BoxDecoration(
+                    color: Colors.red,
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(
+                    Icons.call_end,
+                    color: Colors.white,
+                    size: 35,
                   ),
                 ),
               ),
+            ),
           ],
         ),
       ),
@@ -310,6 +422,34 @@ class _CallScreenState extends State<CallScreen> {
     );
   }
 
+  Widget _buildCallButton({
+    required IconData icon,
+    required String label,
+    required VoidCallback onPressed,
+  }) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 60,
+          height: 60,
+          decoration: BoxDecoration(
+            color: Colors.grey[800],
+            shape: BoxShape.circle,
+          ),
+          child: IconButton(
+            icon: Icon(icon),
+            color: Colors.white,
+            iconSize: 30,
+            onPressed: onPressed,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(label, style: const TextStyle(color: Colors.white, fontSize: 12)),
+      ],
+    );
+  }
+
   void _toggleMic() {
     setState(() => _isMicMuted = !_isMicMuted);
     _localRenderer.srcObject?.getAudioTracks().forEach((track) {
@@ -319,12 +459,10 @@ class _CallScreenState extends State<CallScreen> {
 
   void _toggleVideo() {
     setState(() => _isVideoEnabled = !_isVideoEnabled);
-    // Implement video toggle logic
   }
 
   void _toggleSpeaker() {
     setState(() => _isSpeakerOn = !_isSpeakerOn);
-    // Implement speaker toggle logic
   }
 
   Future<void> _endCall() async {

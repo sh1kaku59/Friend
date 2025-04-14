@@ -6,7 +6,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import '../auth/login_screen.dart';
 import '../call/call_screen.dart';
 import 'view_profile.dart';
-import 'package:friend/screens/friend/FriendRequestsScreen.dart';
+import 'package:friend/screens/friend/NotificationsScreen.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'dart:io';
@@ -433,8 +433,171 @@ class _FriendListScreenState extends State<FriendListScreen> {
         );
   }
 
-  void _blockFriend(String friendId) {
-    print("Chặn bạn bè: $friendId");
+  /// **🚫 Chặn người dùng**
+  Future<void> _blockFriend(String friendId) async {
+    try {
+      bool confirm = await showDialog(
+        context: context,
+        builder: (BuildContext context) {
+          return Dialog(
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+            ),
+            elevation: 16,
+            child: Container(
+              padding: EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(20),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black26,
+                    blurRadius: 10,
+                    offset: Offset(0, 4),
+                  ),
+                ],
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.block, color: Colors.red, size: 50),
+                  SizedBox(height: 16),
+                  Text(
+                    'Xác nhận chặn',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.black87,
+                    ),
+                  ),
+                  SizedBox(height: 8),
+                  Text(
+                    'Bạn có chắc chắn muốn chặn người dùng này không?',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 16, color: Colors.black54),
+                  ),
+                  SizedBox(height: 20),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: [
+                      Expanded(
+                        child: ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.grey[300],
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            padding: EdgeInsets.symmetric(vertical: 12),
+                          ),
+                          onPressed: () => Navigator.of(context).pop(false),
+                          child: Text(
+                            "Hủy",
+                            style: TextStyle(
+                              fontSize: 16,
+                              color: Colors.black54,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ),
+                      SizedBox(width: 12),
+                      Expanded(
+                        child: ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.red,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            padding: EdgeInsets.symmetric(vertical: 12),
+                          ),
+                          onPressed: () => Navigator.of(context).pop(true),
+                          child: Text(
+                            "Chặn",
+                            style: TextStyle(
+                              fontSize: 16,
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      );
+      if (confirm != true) return;
+      if (currentUserId == null) return;
+
+      await FirebaseDatabase.instance
+          .ref('blocked_users/$currentUserId/$friendId')
+          .set({'blockedAt': ServerValue.timestamp, 'status': 'blocked'});
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Đã chặn người dùng thành công')),
+        );
+      }
+
+      setState(() {});
+    } catch (e) {
+      print('Lỗi khi chặn người dùng: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Có lỗi xảy ra khi chặn người dùng')),
+        );
+      }
+    }
+  }
+
+  /// **🔓 Bỏ chặn người dùng**
+  Future<void> _unblockFriend(String friendId) async {
+    try {
+      if (currentUserId == null) return;
+
+      // Xóa khỏi danh sách người bị chặn
+      await FirebaseDatabase.instance
+          .ref('blocked_users/$currentUserId/$friendId')
+          .remove();
+
+      // Hiển thị thông báo thành công
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Đã bỏ chặn người dùng')));
+      }
+
+      // Refresh UI
+      setState(() {});
+    } catch (e) {
+      print('Lỗi khi bỏ chặn người dùng: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Có lỗi xảy ra khi bỏ chặn người dùng')),
+        );
+      }
+    }
+  }
+
+  /// **🔒 Kiểm tra xem người dùng có bị chặn không**
+  Future<bool> _isUserBlocked(String friendId) async {
+    if (currentUserId == null) return false;
+
+    try {
+      final blockedSnapshot =
+          await FirebaseDatabase.instance
+              .ref('blocked_users/$currentUserId/$friendId')
+              .get();
+
+      return blockedSnapshot.exists;
+    } catch (e) {
+      print('Lỗi khi kiểm tra trạng thái block: $e');
+      return false;
+    }
   }
 
   @override
@@ -501,8 +664,7 @@ class _FriendListScreenState extends State<FriendListScreen> {
                                 Navigator.push(
                                   context,
                                   MaterialPageRoute(
-                                    builder:
-                                        (context) => FriendRequestsScreen(),
+                                    builder: (context) => NotificationsScreen(),
                                   ),
                                 );
                               },
@@ -850,152 +1012,248 @@ class _FriendListScreenState extends State<FriendListScreen> {
                             itemCount: friends.length,
                             itemBuilder: (context, index) {
                               final friend = friends[index];
-                              return Card(
-                                margin: EdgeInsets.symmetric(
-                                  horizontal: 16,
-                                  vertical: 8,
+                              return StreamBuilder<bool>(
+                                stream: Stream.fromFuture(
+                                  _isUserBlocked(friend.uid),
                                 ),
-                                elevation: 4,
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(15),
-                                ),
-                                child: ListTile(
-                                  leading: Stack(
-                                    children: [
-                                      CircleAvatar(
-                                        backgroundImage:
-                                            friend.avatarUrl != null
-                                                ? NetworkImage(
-                                                  friend.avatarUrl!,
-                                                )
-                                                : AssetImage(
-                                                      "assets/default_avatar.png",
-                                                    )
-                                                    as ImageProvider,
-                                        radius: 25,
-                                      ),
-                                      Positioned(
-                                        bottom: 0,
-                                        right: 0,
-                                        child: Container(
-                                          width: 12,
-                                          height: 12,
-                                          decoration: BoxDecoration(
-                                            shape: BoxShape.circle,
-                                            color:
-                                                friend.online
-                                                    ? Colors.green
-                                                    : Colors.grey,
-                                            border: Border.all(
-                                              color: Colors.white,
-                                              width: 2,
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                  title: Text(
-                                    friend.username,
-                                    style: TextStyle(
-                                      fontWeight: FontWeight.bold,
+                                builder: (context, snapshot) {
+                                  bool isBlocked = snapshot.data ?? false;
+
+                                  return Card(
+                                    margin: EdgeInsets.symmetric(
+                                      horizontal: 16,
+                                      vertical: 8,
                                     ),
-                                  ),
-                                  subtitle:
-                                      friend.online
-                                          ? Text(
-                                            "Online",
+                                    elevation: 4,
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(15),
+                                    ),
+                                    child: Stack(
+                                      children: [
+                                        ListTile(
+                                          leading: Stack(
+                                            children: [
+                                              CircleAvatar(
+                                                backgroundImage:
+                                                    friend.avatarUrl != null
+                                                        ? NetworkImage(
+                                                          friend.avatarUrl!,
+                                                        )
+                                                        : AssetImage(
+                                                              "assets/default_avatar.png",
+                                                            )
+                                                            as ImageProvider,
+                                                radius: 25,
+                                              ),
+                                              Positioned(
+                                                bottom: 0,
+                                                right: 0,
+                                                child: Container(
+                                                  width: 12,
+                                                  height: 12,
+                                                  decoration: BoxDecoration(
+                                                    shape: BoxShape.circle,
+                                                    color:
+                                                        friend.online
+                                                            ? Colors.green
+                                                            : Colors.grey,
+                                                    border: Border.all(
+                                                      color: Colors.white,
+                                                      width: 2,
+                                                    ),
+                                                  ),
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                          title: Text(
+                                            friend.username,
                                             style: TextStyle(
-                                              color: Colors.green,
-                                            ),
-                                          )
-                                          : Text(
-                                            _getLastSeenText(friend.lastOnline),
-                                            style: TextStyle(
-                                              color: Colors.grey,
+                                              fontWeight: FontWeight.bold,
+                                              color:
+                                                  isBlocked
+                                                      ? Colors.grey
+                                                      : null, // Làm mờ tên nếu bị chặn
                                             ),
                                           ),
-                                  trailing: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      IconButton(
-                                        icon: Icon(
-                                          Icons.call,
-                                          color: Colors.blue,
+                                          subtitle: Row(
+                                            children: [
+                                              if (isBlocked)
+                                                Icon(
+                                                  Icons.block,
+                                                  size: 16,
+                                                  color: Colors.red,
+                                                ),
+                                              if (isBlocked) SizedBox(width: 4),
+                                              Text(
+                                                isBlocked
+                                                    ? "Đã chặn"
+                                                    : (friend.online
+                                                        ? "Online"
+                                                        : _getLastSeenText(
+                                                          friend.lastOnline,
+                                                        )),
+                                                style: TextStyle(
+                                                  color:
+                                                      isBlocked
+                                                          ? Colors.red
+                                                          : (friend.online
+                                                              ? Colors.green
+                                                              : Colors.grey),
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                          trailing: Row(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              // Nút gọi điện sẽ bị disable nếu người dùng bị chặn
+                                              IconButton(
+                                                icon: Icon(
+                                                  Icons.call,
+                                                  color:
+                                                      isBlocked
+                                                          ? Colors.grey
+                                                          : Colors.blue,
+                                                ),
+                                                onPressed:
+                                                    isBlocked
+                                                        ? null
+                                                        : () => _startCall(
+                                                          friend.uid,
+                                                          friend.username,
+                                                          friend.avatarUrl ??
+                                                              '',
+                                                        ),
+                                              ),
+                                              PopupMenuButton<String>(
+                                                icon: Icon(Icons.more_vert),
+                                                onSelected: (value) async {
+                                                  if (value == "profile") {
+                                                    _viewProfile(
+                                                      context,
+                                                      friend,
+                                                      currentUserId!,
+                                                    );
+                                                  } else if (value ==
+                                                      "remove") {
+                                                    _removeFriend(friend.uid);
+                                                  } else if (value == "block") {
+                                                    await _blockFriend(
+                                                      friend.uid,
+                                                    );
+                                                  } else if (value ==
+                                                      "unblock") {
+                                                    await _unblockFriend(
+                                                      friend.uid,
+                                                    );
+                                                  }
+                                                },
+                                                itemBuilder:
+                                                    (context) => [
+                                                      PopupMenuItem(
+                                                        value: "profile",
+                                                        child: Row(
+                                                          children: [
+                                                            Icon(
+                                                              Icons.person,
+                                                              color:
+                                                                  Colors.green,
+                                                            ),
+                                                            SizedBox(width: 10),
+                                                            Text("Xem hồ sơ"),
+                                                          ],
+                                                        ),
+                                                      ),
+                                                      PopupMenuItem(
+                                                        value: "remove",
+                                                        child: Row(
+                                                          children: [
+                                                            Icon(
+                                                              Icons
+                                                                  .person_remove,
+                                                              color: Colors.red,
+                                                            ),
+                                                            SizedBox(width: 10),
+                                                            Text("Hủy kết bạn"),
+                                                          ],
+                                                        ),
+                                                      ),
+                                                      // Hiển thị nút Block hoặc Unblock tùy thuộc vào trạng thái
+                                                      if (!isBlocked)
+                                                        PopupMenuItem(
+                                                          value: "block",
+                                                          child: Row(
+                                                            children: [
+                                                              Icon(
+                                                                Icons.block,
+                                                                color:
+                                                                    Colors.red,
+                                                              ),
+                                                              SizedBox(
+                                                                width: 10,
+                                                              ),
+                                                              Text(
+                                                                "Chặn bạn bè",
+                                                              ),
+                                                            ],
+                                                          ),
+                                                        )
+                                                      else
+                                                        PopupMenuItem(
+                                                          value: "unblock",
+                                                          child: Row(
+                                                            children: [
+                                                              Icon(
+                                                                Icons
+                                                                    .person_add,
+                                                                color:
+                                                                    Colors.blue,
+                                                              ),
+                                                              SizedBox(
+                                                                width: 10,
+                                                              ),
+                                                              Text("Bỏ chặn"),
+                                                            ],
+                                                          ),
+                                                        ),
+                                                    ],
+                                              ),
+                                            ],
+                                          ),
                                         ),
-                                        onPressed:
-                                            () => _startCall(
-                                              friend.uid,
-                                              friend.username,
-                                              friend.avatarUrl ?? '',
+                                        if (isBlocked)
+                                          Positioned(
+                                            top: 0,
+                                            right: 0,
+                                            child: Container(
+                                              padding: EdgeInsets.symmetric(
+                                                horizontal: 8,
+                                                vertical: 4,
+                                              ),
+                                              decoration: BoxDecoration(
+                                                color: Colors.red,
+                                                borderRadius: BorderRadius.only(
+                                                  topRight: Radius.circular(15),
+                                                  bottomLeft: Radius.circular(
+                                                    15,
+                                                  ),
+                                                ),
+                                              ),
+                                              child: Text(
+                                                'Đã chặn',
+                                                style: TextStyle(
+                                                  color: Colors.white,
+                                                  fontSize: 12,
+                                                  fontWeight: FontWeight.bold,
+                                                ),
+                                              ),
                                             ),
-                                      ),
-                                      Tooltip(
-                                        message: "Những mục khác",
-                                        child: PopupMenuButton<String>(
-                                          icon: Icon(
-                                            Icons.more_vert,
-                                          ), // Icon ba chấm
-                                          onSelected: (value) {
-                                            if (value == "remove") {
-                                              _removeFriend(friend.uid);
-                                            } else if (value == "profile") {
-                                              _viewProfile(
-                                                context,
-                                                friend,
-                                                currentUserId!,
-                                              );
-                                            } else if (value == "block") {
-                                              _blockFriend(friend.uid);
-                                            }
-                                          },
-                                          itemBuilder:
-                                              (context) => [
-                                                PopupMenuItem(
-                                                  value: "profile",
-                                                  child: Row(
-                                                    children: [
-                                                      Icon(
-                                                        Icons.person,
-                                                        color: Colors.green,
-                                                      ),
-                                                      SizedBox(width: 10),
-                                                      Text("Xem hồ sơ"),
-                                                    ],
-                                                  ),
-                                                ),
-                                                PopupMenuItem(
-                                                  value: "remove",
-                                                  child: Row(
-                                                    children: [
-                                                      Icon(
-                                                        Icons.person_remove,
-                                                        color: Colors.red,
-                                                      ),
-                                                      SizedBox(width: 10),
-                                                      Text("Hủy kết bạn"),
-                                                    ],
-                                                  ),
-                                                ),
-                                                PopupMenuItem(
-                                                  value: "block",
-                                                  child: Row(
-                                                    children: [
-                                                      Icon(
-                                                        Icons.block,
-                                                        color: Colors.red,
-                                                      ),
-                                                      SizedBox(width: 10),
-                                                      Text("Chặn bạn bè"),
-                                                    ],
-                                                  ),
-                                                ),
-                                              ],
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
+                                          ),
+                                      ],
+                                    ),
+                                  );
+                                },
                               );
                             },
                           );

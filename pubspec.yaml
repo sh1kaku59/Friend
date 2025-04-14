@@ -76,6 +76,7 @@ flutter:
 
   assets: 
     - assets/background_notification.png
+    - assets/background_call.png
     - assets/default_avatar.png
     - assets/sounds/
 

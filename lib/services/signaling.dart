@@ -39,6 +39,18 @@ class Signaling {
     try {
       print("Initiating call from $callerId to $receiverId");
 
+      // Kiểm tra xem người nhận có chặn người gọi không
+      bool isBlocked = await isUserBlocked(callerId, receiverId);
+      if (isBlocked) {
+        throw Exception('Bạn không thể gọi cho người dùng này vì đã bị chặn');
+      }
+
+      // Kiểm tra xem người gọi có bị người nhận chặn không
+      bool isBlockedByReceiver = await isUserBlocked(receiverId, callerId);
+      if (isBlockedByReceiver) {
+        throw Exception('Bạn không thể gọi cho người dùng này');
+      }
+
       // Check for existing calls first
       final existingCallsSnapshot =
           await FirebaseDatabase.instance
@@ -382,5 +394,25 @@ class Signaling {
 
     peerConnection = pc;
     return pc;
+  }
+
+  Future<bool> isUserBlocked(String callerId, String receiverId) async {
+    try {
+      // Kiểm tra xem người nhận có chặn người gọi không
+      final blockedSnapshot =
+          await FirebaseDatabase.instance
+              .ref('blocked_users/$receiverId/$callerId')
+              .get();
+
+      if (blockedSnapshot.exists) {
+        final blockData = blockedSnapshot.value as Map<dynamic, dynamic>;
+        return blockData['status'] == 'blocked';
+      }
+
+      return false;
+    } catch (e) {
+      print('Lỗi khi kiểm tra người dùng bị chặn: $e');
+      return false;
+    }
   }
 }
