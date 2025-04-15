@@ -47,6 +47,12 @@ class _CallScreenState extends State<CallScreen> {
     return '$minutes:$secs';
   }
 
+  // Thêm biến để theo dõi trạng thái audio track
+  MediaStreamTrack? _audioTrack;
+
+  // Thêm biến để theo dõi trạng thái audio output
+  bool _isUsingSpeaker = true;
+
   @override
   void initState() {
     super.initState();
@@ -55,6 +61,7 @@ class _CallScreenState extends State<CallScreen> {
     _setupCallStateListener();
     _setupAutoEndTimer();
     _setupCallListener();
+    _initializeAudioOutput();
   }
 
   void _setupAutoEndTimer() {
@@ -80,9 +87,13 @@ class _CallScreenState extends State<CallScreen> {
 
       // Khởi tạo stream mới với camera và microphone
       final Map<String, dynamic> mediaConstraints = {
-        'audio': true,
+        'audio': {
+          'echoCancellation': true, // Thêm echo cancellation
+          'noiseSuppression': true, // Thêm noise suppression
+          'autoGainControl': true, // Tự động điều chỉnh gain
+        },
         'video': {
-          'facingMode': 'user', // Sử dụng camera trước
+          'facingMode': 'user',
           'width': {'ideal': 1280},
           'height': {'ideal': 720},
         },
@@ -92,8 +103,18 @@ class _CallScreenState extends State<CallScreen> {
         mediaConstraints,
       );
 
-      // Gán stream vào renderer để hiển thị
+      // Lưu audio track để dễ quản lý
+      _audioTrack = stream.getAudioTracks().first;
+
+      // Gán stream vào renderer
       _localRenderer.srcObject = stream;
+
+      // Đặt trạng thái ban đầu của tracks
+      stream.getVideoTracks().forEach((track) {
+        track.enabled = _isVideoEnabled;
+      });
+
+      _audioTrack?.enabled = !_isMicMuted;
 
       // Cập nhật state để rebuild UI
       if (mounted) {
@@ -101,9 +122,9 @@ class _CallScreenState extends State<CallScreen> {
       }
     } catch (e) {
       print('Error setting up local stream: $e');
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Không thể khởi tạo camera: $e')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Không thể khởi tạo thiết bị: $e')),
+      );
     }
   }
 
@@ -149,6 +170,12 @@ class _CallScreenState extends State<CallScreen> {
         case 'call_accepted':
           setState(() {
             _remoteRenderer.srcObject = state['remoteStream'];
+            // Kiểm tra audio tracks
+            final audioTracks = state['remoteStream'].getAudioTracks();
+            print('Number of audio tracks: ${audioTracks.length}');
+            audioTracks.forEach((track) {
+              print('Audio track enabled: ${track.enabled}');
+            });
           });
           break;
         case 'call_ended':
@@ -229,23 +256,28 @@ class _CallScreenState extends State<CallScreen> {
               ),
 
               // Local camera view (small frame)
-              Positioned(
-                top: 20,
-                right: 20,
-                child: Container(
-                  width: 120,
-                  height: 160,
-                  decoration: BoxDecoration(
-                    border: Border.all(color: Colors.white, width: 2),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: RTCVideoView(
-                    _localRenderer,
-                    mirror: true,
-                    objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+              if (_isVideoEnabled)
+                Positioned(
+                  top: 20,
+                  left: 20,
+                  child: Container(
+                    width: 120,
+                    height: 160,
+                    decoration: BoxDecoration(
+                      border: Border.all(color: Colors.white, width: 2),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: RTCVideoView(
+                        _localRenderer,
+                        mirror: true,
+                        objectFit:
+                            RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                      ),
+                    ),
                   ),
                 ),
-              ),
 
               // Controls overlay
               Positioned(
@@ -452,17 +484,78 @@ class _CallScreenState extends State<CallScreen> {
 
   void _toggleMic() {
     setState(() => _isMicMuted = !_isMicMuted);
-    _localRenderer.srcObject?.getAudioTracks().forEach((track) {
-      track.enabled = !_isMicMuted;
-    });
+
+    // Sử dụng audio track đã lưu
+    if (_audioTrack != null) {
+      _audioTrack!.enabled = !_isMicMuted;
+      print("Microphone ${_isMicMuted ? 'muted' : 'unmuted'}");
+    }
+
+    // Thông báo trạng thái mic
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(_isMicMuted ? 'Đã tắt mic' : 'Đã bật mic'),
+        duration: Duration(seconds: 1),
+      ),
+    );
   }
 
   void _toggleVideo() {
     setState(() => _isVideoEnabled = !_isVideoEnabled);
+
+    // Bật/tắt video track
+    if (_localRenderer.srcObject != null) {
+      final localStream = _localRenderer.srcObject as MediaStream;
+      localStream.getVideoTracks().forEach((track) {
+        track.enabled = _isVideoEnabled;
+      });
+    }
   }
 
-  void _toggleSpeaker() {
-    setState(() => _isSpeakerOn = !_isSpeakerOn);
+  void _toggleSpeaker() async {
+    try {
+      if (_remoteRenderer.srcObject != null) {
+        final stream = _remoteRenderer.srcObject as MediaStream;
+
+        // Lấy audio element từ remote renderer
+        final audioTracks = stream.getAudioTracks();
+        if (audioTracks.isNotEmpty) {
+          // Thay đổi trạng thái loa
+          setState(() => _isSpeakerOn = !_isSpeakerOn);
+
+          // Áp dụng thay đổi cho audio output
+          await Helper.selectAudioOutput(_isSpeakerOn ? 'speaker' : 'earpiece');
+
+          // Thông báo trạng thái loa
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                _isSpeakerOn ? 'Đã bật loa ngoài' : 'Đã tắt loa ngoài',
+              ),
+              duration: Duration(seconds: 1),
+            ),
+          );
+
+          print("Speaker ${_isSpeakerOn ? 'enabled' : 'disabled'}");
+        }
+      }
+    } catch (e) {
+      print('Error toggling speaker: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Không thể thay đổi trạng thái loa: $e')),
+      );
+    }
+  }
+
+  // Thêm hàm để khởi tạo audio output khi bắt đầu cuộc gọi
+  void _initializeAudioOutput() async {
+    try {
+      // Mặc định sử dụng loa ngoài khi bắt đầu cuộc gọi
+      await Helper.selectAudioOutput('speaker');
+      setState(() => _isSpeakerOn = true);
+    } catch (e) {
+      print('Error initializing audio output: $e');
+    }
   }
 
   Future<void> _endCall() async {
@@ -492,6 +585,15 @@ class _CallScreenState extends State<CallScreen> {
       _callStateSubscription.cancel();
       _audioService.stopRingtone();
       _signaling.endCall();
+
+      // Reset audio output về mặc định
+      Helper.selectAudioOutput('earpiece').catchError((e) {
+        print('Error resetting audio output: $e');
+      });
+
+      // Tắt audio track
+      _audioTrack?.stop();
+      _audioTrack = null;
 
       // Tắt local stream
       if (_localRenderer.srcObject != null) {

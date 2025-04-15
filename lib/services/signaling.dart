@@ -35,6 +35,11 @@ class Signaling {
   String? _localUuid;
   StreamSubscription? _callSubscription;
 
+  // Thêm các biến để theo dõi trạng thái cuộc gọi
+  int _callDuration = 0;
+  bool _isCallAccepted = false;
+  Timer? _callDurationTimer;
+
   Future<void> initiateCall(String callerId, String receiverId) async {
     try {
       print("Initiating call from $callerId to $receiverId");
@@ -119,6 +124,12 @@ class Signaling {
       await peerConnection!.setLocalDescription(offer);
       print("Created and set local description");
 
+      // Lấy thông tin người gọi
+      final callerData = await getUserData(callerId);
+      if (callerData == null) {
+        throw Exception('Không tìm thấy thông tin người gọi');
+      }
+
       // Save call data to database
       await FirebaseDatabase.instance.ref('calls/$appointmentId').set({
         'callerId': callerId,
@@ -127,25 +138,23 @@ class Signaling {
         'offer': offer.sdp,
         'type': offer.type,
         'created': ServerValue.timestamp,
+        'callerName': callerData['username'],
+        'callerAvatar': callerData['avatar'],
+        'accepted': false,
+        'duration': 0,
       });
       print("Saved call data to database");
 
-      // Listen for answer
+      // Bắt đầu đếm thời gian cuộc gọi khi được chấp nhận
       FirebaseDatabase.instance.ref('calls/$appointmentId').onValue.listen((
         event,
-      ) async {
+      ) {
         if (event.snapshot.value == null) return;
 
         final data = event.snapshot.value as Map<dynamic, dynamic>;
-        print("Received call update: ${data['status']}");
-
-        if (data['status'] == 'accepted' && data['answer'] != null) {
-          print("Call accepted, setting remote description");
-          final answer = RTCSessionDescription(
-            data['answer'],
-            data['answerType'],
-          );
-          await peerConnection!.setRemoteDescription(answer);
+        if (data['status'] == 'accepted' && !_isCallAccepted) {
+          _isCallAccepted = true;
+          _startCallDurationTimer();
         }
       });
     } catch (e) {
@@ -217,7 +226,13 @@ class Signaling {
         'status': 'accepted',
         'answer': answer.sdp,
         'answerType': answer.type,
+        'accepted': true,
       });
+
+      // Bắt đầu đếm thời gian cuộc gọi
+      _isCallAccepted = true;
+      _startCallDurationTimer();
+
       print("Updated call status to accepted");
     } catch (e) {
       print("Error in acceptCall: $e");
@@ -229,11 +244,21 @@ class Signaling {
     try {
       print("Ending call for appointment: $appointmentId");
 
+      // Dừng timer đếm thời gian
+      _callDurationTimer?.cancel();
+
       if (appointmentId != null) {
         await FirebaseDatabase.instance.ref('calls/$appointmentId').update({
           'status': 'ended',
+          'endedAt': ServerValue.timestamp,
+          'duration': _callDuration,
+          'accepted': _isCallAccepted,
         });
       }
+
+      // Reset các biến theo dõi trạng thái
+      _callDuration = 0;
+      _isCallAccepted = false;
 
       await _callSubscription?.cancel();
       _callSubscription = null;
@@ -414,5 +439,20 @@ class Signaling {
       print('Lỗi khi kiểm tra người dùng bị chặn: $e');
       return false;
     }
+  }
+
+  // Thêm hàm để đếm thời gian cuộc gọi
+  void _startCallDurationTimer() {
+    _callDurationTimer?.cancel();
+    _callDurationTimer = Timer.periodic(Duration(seconds: 1), (timer) {
+      _callDuration++;
+    });
+  }
+
+  // Thêm hàm dispose để cleanup
+  void dispose() {
+    _callDurationTimer?.cancel();
+    _callDuration = 0;
+    _isCallAccepted = false;
   }
 }

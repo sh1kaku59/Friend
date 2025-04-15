@@ -53,15 +53,23 @@ class _NotificationsScreenState extends State<NotificationsScreen>
   List<CallNotification> callNotifications = [];
   late TabController _tabController;
 
+  // Thêm các biến để quản lý trạng thái chọn
+  bool _isSelectionMode = false;
+  Set<String> _selectedCalls = {};
+  bool get _hasSelectedItems => _selectedCalls.isNotEmpty;
+
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 2, vsync: this);
+    _tabController.addListener(_handleTabChange);
     _getCurrentUserId();
   }
 
+  /// Hủy bỏ TabController
   @override
   void dispose() {
+    _tabController.removeListener(_handleTabChange);
     _tabController.dispose();
     super.dispose();
   }
@@ -100,36 +108,74 @@ class _NotificationsScreenState extends State<NotificationsScreen>
     });
   }
 
+  /// Lấy danh sách thông báo cuộc gọi
   void _fetchCallNotifications() async {
     if (currentUserId == null) return;
 
     final callsRef = FirebaseDatabase.instance.ref().child('calls');
-    final query = callsRef
-        .orderByChild('participants/${currentUserId}')
-        .equalTo(true);
 
-    query.onValue.listen((event) {
+    // Lắng nghe thay đổi realtime
+    callsRef.onValue.listen((event) async {
       if (!event.snapshot.exists) return;
 
       final calls = <CallNotification>[];
       final data = event.snapshot.value as Map<dynamic, dynamic>;
 
-      data.forEach((key, value) {
-        if (value is Map) {
-          final call = CallNotification.fromMap(
-            value as Map<dynamic, dynamic>,
-            key,
-          );
-          calls.add(call);
+      for (var entry in data.entries) {
+        final key = entry.key;
+        final value = entry.value as Map<dynamic, dynamic>;
+
+        // Kiểm tra xem cuộc gọi có liên quan đến người dùng hiện tại không
+        if (value['callerId'] == currentUserId ||
+            value['receiverId'] == currentUserId) {
+          String status = value['status'];
+          if (status == 'ended') {
+            status = value['accepted'] == true ? 'completed' : 'missed';
+          }
+
+          // Lấy thông tin người gọi hoặc người nhận
+          String userId = value['callerId'];
+          // Nếu người dùng hiện tại là người gọi, hiển thị thông tin người nhận
+          if (userId == currentUserId) {
+            userId = value['receiverId'];
+          }
+
+          // Lấy thông tin user từ database
+          final userSnapshot =
+              await FirebaseDatabase.instance
+                  .ref()
+                  .child('users/$userId')
+                  .get();
+
+          if (userSnapshot.exists) {
+            final userData = userSnapshot.value as Map<dynamic, dynamic>;
+
+            final call = CallNotification(
+              callerId: userId,
+              callerName: userData['username'] ?? 'Unknown User',
+              callerAvatar:
+                  userData['avatar'] ?? 'https://via.placeholder.com/150',
+              status: status,
+              timestamp: DateTime.fromMillisecondsSinceEpoch(
+                value['created'] ?? DateTime.now().millisecondsSinceEpoch,
+              ),
+              appointmentId: key,
+              duration: value['duration'] ?? 0,
+            );
+
+            calls.add(call);
+          }
         }
-      });
+      }
 
       // Sắp xếp theo thời gian mới nhất
       calls.sort((a, b) => b.timestamp.compareTo(a.timestamp));
 
-      setState(() {
-        callNotifications = calls;
-      });
+      if (mounted) {
+        setState(() {
+          callNotifications = calls;
+        });
+      }
     });
   }
 
@@ -220,12 +266,14 @@ class _NotificationsScreenState extends State<NotificationsScreen>
     );
   }
 
+  /// Định dạng thời gian cuộc gọi
   String _formatDuration(int seconds) {
     final minutes = (seconds ~/ 60).toString().padLeft(2, '0');
     final secs = (seconds % 60).toString().padLeft(2, '0');
     return '$minutes:$secs';
   }
 
+  /// Định dạng ngày tháng cuộc gọi
   String _formatTimestamp(DateTime timestamp) {
     final now = DateTime.now();
     final difference = now.difference(timestamp);
@@ -239,6 +287,7 @@ class _NotificationsScreenState extends State<NotificationsScreen>
     }
   }
 
+  /// Xây dựng biểu tượng cuộc gọi
   Widget _buildCallIcon(String status) {
     IconData iconData;
     Color iconColor;
@@ -264,6 +313,7 @@ class _NotificationsScreenState extends State<NotificationsScreen>
     return Icon(iconData, color: iconColor);
   }
 
+  /// Xây dựng danh sách lời mời kết bạn
   Widget _buildFriendRequestsList() {
     if (friendRequests.isEmpty) {
       return Center(
@@ -336,6 +386,7 @@ class _NotificationsScreenState extends State<NotificationsScreen>
     );
   }
 
+  /// Xây dựng danh sách cuộc gọi
   Widget _buildCallList() {
     if (callNotifications.isEmpty) {
       return Center(
@@ -378,6 +429,10 @@ class _NotificationsScreenState extends State<NotificationsScreen>
             itemCount: callNotifications.length,
             itemBuilder: (context, index) {
               final call = callNotifications[index];
+              final bool isSelected = _selectedCalls.contains(
+                call.appointmentId,
+              );
+
               return Card(
                 margin: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                 elevation: 4,
@@ -385,9 +440,46 @@ class _NotificationsScreenState extends State<NotificationsScreen>
                   borderRadius: BorderRadius.circular(15),
                 ),
                 child: ListTile(
-                  leading: CircleAvatar(
-                    backgroundImage: NetworkImage(call.callerAvatar),
-                    radius: 25,
+                  onTap:
+                      _isSelectionMode
+                          ? () {
+                            setState(() {
+                              if (isSelected) {
+                                _selectedCalls.remove(call.appointmentId);
+                              } else {
+                                _selectedCalls.add(call.appointmentId);
+                              }
+                            });
+                          }
+                          : null,
+                  leading: Stack(
+                    children: [
+                      CircleAvatar(
+                        backgroundImage:
+                            call.callerAvatar.startsWith('http')
+                                ? NetworkImage(call.callerAvatar)
+                                : AssetImage('assets/default_avatar.png')
+                                    as ImageProvider,
+                        radius: 25,
+                      ),
+                      if (_isSelectionMode)
+                        Positioned(
+                          right: 0,
+                          bottom: 0,
+                          child: Container(
+                            decoration: BoxDecoration(
+                              color:
+                                  isSelected ? Colors.blue : Colors.grey[300],
+                              shape: BoxShape.circle,
+                            ),
+                            child: Icon(
+                              isSelected ? Icons.check : Icons.circle_outlined,
+                              size: 20,
+                              color: Colors.white,
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
                   title: Text(
                     call.callerName,
@@ -404,12 +496,15 @@ class _NotificationsScreenState extends State<NotificationsScreen>
                       ],
                     ],
                   ),
-                  trailing: IconButton(
-                    icon: Icon(Icons.call, color: Colors.blue),
-                    onPressed: () {
-                      // Xử lý gọi lại
-                    },
-                  ),
+                  trailing:
+                      _isSelectionMode
+                          ? null
+                          : IconButton(
+                            icon: Icon(Icons.call, color: Colors.blue),
+                            onPressed: () {
+                              // Xử lý gọi lại
+                            },
+                          ),
                 ),
               );
             },
@@ -417,6 +512,72 @@ class _NotificationsScreenState extends State<NotificationsScreen>
         ),
       ],
     );
+  }
+
+  /// Xóa cuộc gọi đã chọn
+  Future<void> _deleteSelectedCalls() async {
+    try {
+      // Hiển thị dialog xác nhận
+      bool confirm = await showDialog(
+        context: context,
+        builder: (BuildContext context) {
+          return AlertDialog(
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+            ),
+            title: Text('Xác nhận xóa'),
+            content: Text(
+              'Bạn có chắc chắn muốn xóa ${_selectedCalls.length} cuộc gọi đã chọn không?',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: Text('Hủy'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                child: Text('Xóa', style: TextStyle(color: Colors.red)),
+              ),
+            ],
+          );
+        },
+      );
+
+      if (confirm == true) {
+        // Xóa các cuộc gọi đã chọn từ database
+        final batch = FirebaseDatabase.instance.ref().child('calls');
+        for (String callId in _selectedCalls) {
+          await batch.child(callId).remove();
+        }
+
+        // Reset trạng thái chọn
+        setState(() {
+          _selectedCalls.clear();
+          _isSelectionMode = false;
+        });
+
+        // Hiển thị thông báo thành công
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Đã xóa các cuộc gọi đã chọn')));
+      }
+    } catch (e) {
+      print('Error deleting calls: $e');
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Có lỗi xảy ra khi xóa cuộc gọi')));
+    }
+  }
+
+  /// Xử lý khi chuyển tab
+  void _handleTabChange() {
+    if (_tabController.indexIsChanging) {
+      setState(() {
+        // Reset trạng thái chọn khi chuyển tab
+        _isSelectionMode = false;
+        _selectedCalls.clear();
+      });
+    }
   }
 
   @override
@@ -431,44 +592,79 @@ class _NotificationsScreenState extends State<NotificationsScreen>
             child: SafeArea(
               child: Column(
                 children: [
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                  SizedBox(
+                    height: 56, // Chiều cao chuẩn cho AppBar
                     child: Row(
-                      mainAxisAlignment: MainAxisAlignment.start,
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        IconButton(
-                          icon: Icon(
-                            Icons.arrow_back,
-                            color: Colors.white,
-                            size: 28,
-                          ),
-                          onPressed: () {
-                            Navigator.pop(context);
-                          },
-                        ),
-                        Expanded(
-                          child: Center(
-                            child: Text(
-                              "Thông báo",
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 22,
-                                fontWeight: FontWeight.bold,
-                              ),
+                        // Nút back/close bên trái với padding nhỏ hơn
+                        Padding(
+                          padding: EdgeInsets.only(left: 8),
+                          child: IconButton(
+                            icon: Icon(
+                              _isSelectionMode ? Icons.close : Icons.arrow_back,
+                              color: Colors.white,
+                              size: 28,
                             ),
+                            onPressed: () {
+                              if (_isSelectionMode) {
+                                setState(() {
+                                  _isSelectionMode = false;
+                                  _selectedCalls.clear();
+                                });
+                              } else {
+                                Navigator.pop(context);
+                              }
+                            },
                           ),
                         ),
-                        SizedBox(width: 48),
+                        // Tiêu đề ở giữa
+                        Text(
+                          _isSelectionMode
+                              ? "${_selectedCalls.length} đã chọn"
+                              : "Thông báo",
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 22,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        // Nút edit/delete bên phải - chỉ hiển thị khi ở tab cuộc gọi
+                        Padding(
+                          padding: EdgeInsets.only(right: 8),
+                          child:
+                              _tabController.index == 1
+                                  ? IconButton(
+                                    icon: Icon(
+                                      _isSelectionMode
+                                          ? Icons.delete
+                                          : Icons.edit,
+                                      color: Colors.white,
+                                      size: 28,
+                                    ),
+                                    onPressed: () {
+                                      if (_isSelectionMode &&
+                                          _hasSelectedItems) {
+                                        _deleteSelectedCalls();
+                                      } else {
+                                        setState(() {
+                                          _isSelectionMode = !_isSelectionMode;
+                                          _selectedCalls.clear();
+                                        });
+                                      }
+                                    },
+                                  )
+                                  : SizedBox(
+                                    width: 48,
+                                  ), // Giữ khoảng trống cân đối khi không có nút
+                        ),
                       ],
                     ),
                   ),
                   TabBar(
                     controller: _tabController,
                     tabs: [
-                      Tab(
-                        text: 'Lời mời kết bạn',
-                        icon: Icon(Icons.person_add),
-                      ),
+                      Tab(text: 'Lời mời', icon: Icon(Icons.person_add)),
                       Tab(text: 'Cuộc gọi', icon: Icon(Icons.call)),
                     ],
                     indicatorColor: Colors.white,
