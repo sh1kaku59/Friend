@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'screens/auth/register_screen.dart'; // Import màn hình đăng ký
 import 'screens/auth/login_screen.dart'; // Import màn hình đăng nhập
+import 'screens/main_screen.dart'; // Import màn hình chính
 import 'firebase_options.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 
@@ -33,6 +34,7 @@ class MyApp extends StatelessWidget {
       routes: {
         '/register': (context) => RegisterScreen(),
         '/login': (context) => LoginScreen(),
+        '/main': (context) => MainScreen(), // Thêm route mới
       },
     );
   }
