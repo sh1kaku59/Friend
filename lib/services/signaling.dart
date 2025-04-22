@@ -193,10 +193,24 @@ class Signaling {
 
       // Add local stream with explicit constraints
       _localStream = await navigator.mediaDevices.getUserMedia({
-        'audio': true,
+        'audio': {
+          'echoCancellation': true,
+          'noiseSuppression': true,
+          'autoGainControl': true,
+          'sampleRate': 48000,
+          'channelCount': 2,
+        },
         'video': {'facingMode': 'user', 'optional': []},
       });
       print("Got local stream");
+
+      // Kiểm tra audio tracks
+      final audioTracks = _localStream!.getAudioTracks();
+      print('Local audio tracks in acceptCall: ${audioTracks.length}');
+      audioTracks.forEach((track) {
+        print('Local audio track enabled: ${track.enabled}');
+        track.enabled = true; // Đảm bảo audio được bật
+      });
 
       _localStream!.getTracks().forEach((track) {
         peerConnection!.addTrack(track, _localStream!);

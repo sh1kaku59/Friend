@@ -4,6 +4,7 @@ import '../../services/signaling.dart'; // Import lớp Signaling
 import '../../services/audio_service.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:firebase_database/firebase_database.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 class CallScreen extends StatefulWidget {
   final String friendId;
@@ -53,15 +54,32 @@ class _CallScreenState extends State<CallScreen> {
   // Thêm biến để theo dõi trạng thái audio output
   bool _isUsingSpeaker = true;
 
+  // Thêm biến để theo dõi camera trước/sau
+  bool _isUsingFrontCamera = true;
+
+  // Thêm biến để theo dõi vị trí của camera nhỏ
+  Offset _localVideoPosition = Offset(20, 20);
+
   @override
   void initState() {
     super.initState();
-    _initRenderers();
-    _setupLocalStream();
-    _setupCallStateListener();
-    _setupAutoEndTimer();
-    _setupCallListener();
-    _initializeAudioOutput();
+    _checkAndRequestPermissions().then((_) {
+      _initRenderers();
+      _setupLocalStream();
+      _setupCallStateListener();
+      _setupAutoEndTimer();
+      _setupCallListener();
+      _initializeAudioOutput();
+    });
+  }
+
+  Future<void> _checkAndRequestPermissions() async {
+    Map<Permission, PermissionStatus> statuses =
+        await [Permission.camera, Permission.microphone].request();
+
+    if (statuses[Permission.microphone]!.isDenied) {
+      throw Exception('Microphone permission is required for audio');
+    }
   }
 
   void _setupAutoEndTimer() {
@@ -76,24 +94,27 @@ class _CallScreenState extends State<CallScreen> {
 
   void _setupLocalStream() async {
     try {
+      print('=== Setting up local stream ===');
+
       // Tắt stream cũ nếu có
       if (_localRenderer.srcObject != null) {
         final localStream = _localRenderer.srcObject as MediaStream;
+        print('Stopping old tracks...');
         localStream.getTracks().forEach((track) {
           track.stop();
           track.enabled = false;
         });
       }
 
-      // Khởi tạo stream mới với camera và microphone
+      print('Requesting media with constraints...');
       final Map<String, dynamic> mediaConstraints = {
         'audio': {
-          'echoCancellation': true, // Thêm echo cancellation
-          'noiseSuppression': true, // Thêm noise suppression
-          'autoGainControl': true, // Tự động điều chỉnh gain
+          'echoCancellation': true,
+          'noiseSuppression': true,
+          'autoGainControl': true,
         },
         'video': {
-          'facingMode': 'user',
+          'facingMode': _isUsingFrontCamera ? 'user' : 'environment',
           'width': {'ideal': 1280},
           'height': {'ideal': 720},
         },
@@ -103,25 +124,39 @@ class _CallScreenState extends State<CallScreen> {
         mediaConstraints,
       );
 
+      print('=== Audio Track Information ===');
+      final audioTracks = stream.getAudioTracks();
+      print('Number of audio tracks: ${audioTracks.length}');
+      audioTracks.forEach((track) {
+        print('Audio track ID: ${track.id}');
+        print('Audio track enabled: ${track.enabled}');
+        print('Audio track kind: ${track.kind}');
+        print('Audio track label: ${track.label}');
+      });
+
       // Lưu audio track để dễ quản lý
       _audioTrack = stream.getAudioTracks().first;
+      print('Main audio track saved: ${_audioTrack?.id}');
 
       // Gán stream vào renderer
       _localRenderer.srcObject = stream;
+      print('Stream assigned to local renderer');
 
       // Đặt trạng thái ban đầu của tracks
       stream.getVideoTracks().forEach((track) {
         track.enabled = _isVideoEnabled;
+        print('Video track ${track.id} enabled: ${track.enabled}');
       });
 
       _audioTrack?.enabled = !_isMicMuted;
+      print('Audio track enabled: ${_audioTrack?.enabled}');
 
-      // Cập nhật state để rebuild UI
       if (mounted) {
         setState(() {});
+        print('State updated');
       }
     } catch (e) {
-      print('Error setting up local stream: $e');
+      print('❌ Error setting up local stream: $e');
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Không thể khởi tạo thiết bị: $e')),
       );
@@ -165,23 +200,42 @@ class _CallScreenState extends State<CallScreen> {
   }
 
   void _setupCallStateListener() {
+    print('=== Setting up call state listener ===');
     _callStateSubscription = _signaling.callStateStream.listen((state) {
+      print('Received call state event: ${state['event']}');
+
+      if (!mounted) {
+        print('Widget not mounted, ignoring event');
+        return;
+      }
+
       switch (state['event']) {
         case 'call_accepted':
+          print('Call accepted, setting up remote stream');
           setState(() {
             _remoteRenderer.srcObject = state['remoteStream'];
-            // Kiểm tra audio tracks
-            final audioTracks = state['remoteStream'].getAudioTracks();
-            print('Number of audio tracks: ${audioTracks.length}');
+
+            // Kiểm tra remote stream
+            final remoteStream = state['remoteStream'] as MediaStream;
+            print('=== Remote Stream Information ===');
+            print('Remote stream ID: ${remoteStream.id}');
+
+            final audioTracks = remoteStream.getAudioTracks();
+            print('Remote audio tracks: ${audioTracks.length}');
             audioTracks.forEach((track) {
-              print('Audio track enabled: ${track.enabled}');
+              print('Remote audio track ID: ${track.id}');
+              print('Remote audio track enabled: ${track.enabled}');
+              print('Remote audio track kind: ${track.kind}');
+              print('Remote audio track label: ${track.label}');
             });
           });
           break;
         case 'call_ended':
+          print('Call ended event received');
           Navigator.pop(context);
           break;
         case 'error':
+          print('Error event received: ${state['message']}');
           ScaffoldMessenger.of(
             context,
           ).showSnackBar(SnackBar(content: Text(state['message'])));
@@ -255,26 +309,61 @@ class _CallScreenState extends State<CallScreen> {
                 objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
               ),
 
-              // Local camera view (small frame)
+              // Local camera view (small frame) with drag feature
               if (_isVideoEnabled)
                 Positioned(
-                  top: 20,
-                  left: 20,
-                  child: Container(
-                    width: 120,
-                    height: 160,
-                    decoration: BoxDecoration(
-                      border: Border.all(color: Colors.white, width: 2),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(8),
-                      child: RTCVideoView(
-                        _localRenderer,
-                        mirror: true,
-                        objectFit:
-                            RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
-                      ),
+                  left: _localVideoPosition.dx,
+                  top: _localVideoPosition.dy,
+                  child: GestureDetector(
+                    onPanUpdate: (details) {
+                      setState(() {
+                        _localVideoPosition = Offset(
+                          _localVideoPosition.dx + details.delta.dx,
+                          _localVideoPosition.dy + details.delta.dy,
+                        );
+                      });
+                    },
+                    child: Stack(
+                      children: [
+                        Container(
+                          width: 120,
+                          height: 160,
+                          decoration: BoxDecoration(
+                            border: Border.all(color: Colors.white, width: 2),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(8),
+                            child: RTCVideoView(
+                              _localRenderer,
+                              mirror: _isUsingFrontCamera,
+                              objectFit:
+                                  RTCVideoViewObjectFit
+                                      .RTCVideoViewObjectFitCover,
+                            ),
+                          ),
+                        ),
+                        // Nút chuyển đổi camera
+                        Positioned(
+                          top: 5,
+                          right: 5,
+                          child: GestureDetector(
+                            onTap: _switchCamera,
+                            child: Container(
+                              padding: EdgeInsets.all(4),
+                              decoration: BoxDecoration(
+                                color: Colors.black.withOpacity(0.5),
+                                shape: BoxShape.circle,
+                              ),
+                              child: Icon(
+                                Icons.flip_camera_ios,
+                                color: Colors.white,
+                                size: 20,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
@@ -309,7 +398,7 @@ class _CallScreenState extends State<CallScreen> {
                 ),
               ),
 
-              // Caller info
+              // Caller info và Call duration với khoảng cách phù hợp
               Positioned(
                 top: 20,
                 left: 0,
@@ -329,27 +418,20 @@ class _CallScreenState extends State<CallScreen> {
                         fontWeight: FontWeight.bold,
                       ),
                     ),
+                    // Thêm khoảng cách giữa tên và thời gian
+                    SizedBox(height: 20), // Tăng khoảng cách này
+                    if (_isCallAccepted)
+                      Text(
+                        _formatDuration(_callDuration),
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
                   ],
                 ),
               ),
-
-              // Call duration timer
-              if (_isCallAccepted)
-                Positioned(
-                  top: 80,
-                  left: 0,
-                  right: 0,
-                  child: Center(
-                    child: Text(
-                      _formatDuration(_callDuration),
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ),
-                ),
             ],
           ),
         ),
@@ -483,15 +565,29 @@ class _CallScreenState extends State<CallScreen> {
   }
 
   void _toggleMic() {
+    print('=== Toggling microphone ===');
     setState(() => _isMicMuted = !_isMicMuted);
 
-    // Sử dụng audio track đã lưu
     if (_audioTrack != null) {
       _audioTrack!.enabled = !_isMicMuted;
-      print("Microphone ${_isMicMuted ? 'muted' : 'unmuted'}");
+      print('Audio track ID: ${_audioTrack!.id}');
+      print('Audio track enabled: ${_audioTrack!.enabled}');
+      print('Audio track kind: ${_audioTrack!.kind}');
+      print('Audio track label: ${_audioTrack!.label}');
+
+      // Kiểm tra stream hiện tại
+      if (_localRenderer.srcObject != null) {
+        final localStream = _localRenderer.srcObject as MediaStream;
+        final audioTracks = localStream.getAudioTracks();
+        print('Current stream audio tracks: ${audioTracks.length}');
+        audioTracks.forEach((track) {
+          print('Stream audio track enabled: ${track.enabled}');
+        });
+      }
+    } else {
+      print('❌ Warning: Audio track is null');
     }
 
-    // Thông báo trạng thái mic
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(_isMicMuted ? 'Đã tắt mic' : 'Đã bật mic'),
@@ -622,5 +718,17 @@ class _CallScreenState extends State<CallScreen> {
     }
 
     super.dispose();
+  }
+
+  // Thêm method để chuyển đổi camera:
+  void _switchCamera() async {
+    if (_localRenderer.srcObject != null) {
+      final stream = _localRenderer.srcObject as MediaStream;
+      final videoTrack = stream.getVideoTracks().first;
+      await Helper.switchCamera(videoTrack);
+      setState(() {
+        _isUsingFrontCamera = !_isUsingFrontCamera;
+      });
+    }
   }
 }
