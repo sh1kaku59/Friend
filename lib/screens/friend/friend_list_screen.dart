@@ -6,7 +6,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import '../auth/login_screen.dart';
 import '../call/call_screen.dart';
 import 'view_profile.dart';
-import 'package:friend/screens/friend/NotificationsScreen.dart';
+import 'package:friend/screens/friend/notifications_screen.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'dart:io';

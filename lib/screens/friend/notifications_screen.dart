@@ -403,7 +403,7 @@ class _NotificationsScreenState extends State<NotificationsScreen>
                   255,
                   255,
                   255,
-                )?.withOpacity(0.1),
+                ).withOpacity(0.1),
               ),
               child: Icon(
                 Icons.phone_missed,

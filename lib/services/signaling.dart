@@ -40,6 +40,48 @@ class Signaling {
   bool _isCallAccepted = false;
   Timer? _callDurationTimer;
 
+  // Thêm các cấu hình chất lượng
+  final Map<String, dynamic> _highQualityConstraints = {
+    'audio': {
+      'echoCancellation': true,
+      'noiseSuppression': true,
+      'autoGainControl': true,
+      'sampleRate': 48000,
+      'channelCount': 2,
+    },
+    'video': {
+      'facingMode': 'user',
+      'width': {'ideal': 1280},
+      'height': {'ideal': 720},
+      'frameRate': {'ideal': 30},
+    },
+  };
+
+  final Map<String, dynamic> _lowQualityConstraints = {
+    'audio': {
+      'echoCancellation': true,
+      'noiseSuppression': true,
+      'autoGainControl': true,
+      'sampleRate': 44100,
+      'channelCount': 1,
+    },
+    'video': {
+      'facingMode': 'user',
+      'width': {'ideal': 640},
+      'height': {'ideal': 480},
+      'frameRate': {'ideal': 15},
+    },
+  };
+
+  final Map<String, dynamic> _audioOnlyConstraints = {
+    'audio': {
+      'echoCancellation': true,
+      'noiseSuppression': true,
+      'autoGainControl': true,
+    },
+    'video': false,
+  };
+
   Future<void> initiateCall(String callerId, String receiverId) async {
     try {
       print("Initiating call from $callerId to $receiverId");
@@ -97,10 +139,7 @@ class Signaling {
       print("Created peer connection");
 
       // Add local stream with explicit constraints
-      _localStream = await navigator.mediaDevices.getUserMedia({
-        'audio': true,
-        'video': {'facingMode': 'user', 'optional': []},
-      });
+      _localStream = await _initializeWithFallback();
       print("Got local stream");
 
       _localStream!.getTracks().forEach((track) {
@@ -192,16 +231,7 @@ class Signaling {
       print("Created peer connection");
 
       // Add local stream with explicit constraints
-      _localStream = await navigator.mediaDevices.getUserMedia({
-        'audio': {
-          'echoCancellation': true,
-          'noiseSuppression': true,
-          'autoGainControl': true,
-          'sampleRate': 48000,
-          'channelCount': 2,
-        },
-        'video': {'facingMode': 'user', 'optional': []},
-      });
+      _localStream = await _initializeWithFallback();
       print("Got local stream");
 
       // Kiểm tra audio tracks
@@ -305,26 +335,26 @@ class Signaling {
     await endCall();
   }
 
-  void _listenForCallUpdates(String callId, RTCPeerConnection pc) {
-    _callSubscription = FirebaseDatabase.instance
-        .ref('calls/$callId')
-        .onValue
-        .listen((event) async {
-          if (event.snapshot.value == null) return;
+  // void _listenForCallUpdates(String callId, RTCPeerConnection pc) {
+  //   _callSubscription = FirebaseDatabase.instance
+  //       .ref('calls/$callId')
+  //       .onValue
+  //       .listen((event) async {
+  //         if (event.snapshot.value == null) return;
 
-          final data = event.snapshot.value as Map<dynamic, dynamic>;
-          switch (data['status']) {
-            case CALL_STATUS_ENDED:
-              _callStateController.add({'event': 'call_ended'});
-              await endCall();
-              break;
-            case CALL_STATUS_REJECTED:
-              _callStateController.add({'event': 'call_rejected'});
-              await endCall();
-              break;
-          }
-        });
-  }
+  //         final data = event.snapshot.value as Map<dynamic, dynamic>;
+  //         switch (data['status']) {
+  //           case CALL_STATUS_ENDED:
+  //             _callStateController.add({'event': 'call_ended'});
+  //             await endCall();
+  //             break;
+  //           case CALL_STATUS_REJECTED:
+  //             _callStateController.add({'event': 'call_rejected'});
+  //             await endCall();
+  //             break;
+  //         }
+  //       });
+  // }
 
   Future<Map<String, dynamic>?> getUserData(String userId) async {
     try {
@@ -469,4 +499,52 @@ class Signaling {
     _callDuration = 0;
     _isCallAccepted = false;
   }
+
+  Future<MediaStream?> _initializeWithFallback() async {
+    try {
+      // Thử với chất lượng cao nhất
+      print('Attempting high quality connection...');
+      return await navigator.mediaDevices.getUserMedia(_highQualityConstraints);
+    } catch (e) {
+      print('High quality failed, trying low quality: $e');
+      try {
+        // Fallback về chất lượng thấp
+        return await navigator.mediaDevices.getUserMedia(
+          _lowQualityConstraints,
+        );
+      } catch (e) {
+        print('Low quality failed, trying audio only: $e');
+        try {
+          // Fallback về chỉ audio
+          return await navigator.mediaDevices.getUserMedia(
+            _audioOnlyConstraints,
+          );
+        } catch (e) {
+          print('All attempts failed: $e');
+          throw Exception('Không thể kết nối với thiết bị media: $e');
+        }
+      }
+    }
+  }
+
+  // void _logStreamInfo(MediaStream stream) {
+  //   print('=== Stream Information ===');
+  //   print('Stream ID: ${stream.id}');
+
+  //   print('Audio Tracks:');
+  //   stream.getAudioTracks().forEach((track) {
+  //     print('- ID: ${track.id}');
+  //     print('  Enabled: ${track.enabled}');
+  //     print('  Kind: ${track.kind}');
+  //     print('  Label: ${track.label}');
+  //   });
+
+  //   print('Video Tracks:');
+  //   stream.getVideoTracks().forEach((track) {
+  //     print('- ID: ${track.id}');
+  //     print('  Enabled: ${track.enabled}');
+  //     print('  Kind: ${track.kind}');
+  //     print('  Label: ${track.label}');
+  //   });
+  // }
 }

@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
-import 'dart:async'; // Import for Timer
-import '../../services/signaling.dart'; // Import lớp Signaling
+import 'dart:async';
+import '../../services/signaling.dart';
 import '../../services/audio_service.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:firebase_database/firebase_database.dart';
@@ -27,10 +27,8 @@ class CallScreen extends StatefulWidget {
 }
 
 class _CallScreenState extends State<CallScreen> {
-  // final Signaling _signaling = Signaling();
   late Timer _timer;
   late Timer _autoEndTimer;
-  late StreamSubscription _callSubscription;
   int _callDuration = 0;
   bool _isCallAccepted = false; // Trạng thái cuộc gọi
   final Signaling _signaling = Signaling();
@@ -51,35 +49,127 @@ class _CallScreenState extends State<CallScreen> {
   // Thêm biến để theo dõi trạng thái audio track
   MediaStreamTrack? _audioTrack;
 
-  // Thêm biến để theo dõi trạng thái audio output
-  bool _isUsingSpeaker = true;
-
   // Thêm biến để theo dõi camera trước/sau
   bool _isUsingFrontCamera = true;
 
   // Thêm biến để theo dõi vị trí của camera nhỏ
   Offset _localVideoPosition = Offset(20, 20);
 
+  // Thêm biến để theo dõi trạng thái thiết bị
+  bool _hasAudioInput = false;
+  bool _hasVideoInput = false;
+  bool _hasAudioOutput = false;
+
+  // Thêm biến peerConnection
+  RTCPeerConnection? peerConnection;
+
   @override
   void initState() {
     super.initState();
-    _checkAndRequestPermissions().then((_) {
-      _initRenderers();
-      _setupLocalStream();
-      _setupCallStateListener();
-      _setupAutoEndTimer();
-      _setupCallListener();
-      _initializeAudioOutput();
-    });
+    _initializeCall();
   }
 
-  Future<void> _checkAndRequestPermissions() async {
-    Map<Permission, PermissionStatus> statuses =
-        await [Permission.camera, Permission.microphone].request();
+  Future<void> _initializeCall() async {
+    try {
+      // Kiểm tra thiết bị trước
+      bool deviceReady = await _checkDeviceCompatibility();
+      if (!deviceReady) return;
 
-    if (statuses[Permission.microphone]!.isDenied) {
-      throw Exception('Microphone permission is required for audio');
+      // Khởi tạo renderers
+      await _initRenderers();
+
+      // Thiết lập local stream
+      _setupLocalStream();
+
+      // Thiết lập các listeners
+      _setupCallStateListener();
+      _setupCallListener();
+      _setupAutoEndTimer();
+
+      // Khởi tạo audio output
+      _initializeAudioOutput();
+
+      // Bắt đầu theo dõi chất lượng kết nối
+      _monitorConnectionQuality();
+    } catch (e) {
+      print('Error initializing call: $e');
+      _showErrorDialog('Lỗi khởi tạo cuộc gọi', e.toString());
     }
+  }
+
+  Future<bool> _checkDeviceCompatibility() async {
+    try {
+      print('Checking device compatibility...');
+
+      // Kiểm tra quyền truy cập
+      Map<Permission, PermissionStatus> permissions =
+          await [Permission.camera, Permission.microphone].request();
+
+      if (!permissions[Permission.camera]!.isGranted ||
+          !permissions[Permission.microphone]!.isGranted) {
+        throw Exception('Cần cấp quyền truy cập camera và microphone');
+      }
+
+      // Kiểm tra các thiết bị có sẵn
+      List<MediaDeviceInfo> devices =
+          await navigator.mediaDevices.enumerateDevices();
+
+      _hasAudioInput = devices.any((d) => d.kind == 'audioinput');
+      _hasVideoInput = devices.any((d) => d.kind == 'videoinput');
+      _hasAudioOutput = devices.any((d) => d.kind == 'audiooutput');
+
+      print('Device check results:');
+      print('- Audio Input: $_hasAudioInput');
+      print('- Video Input: $_hasVideoInput');
+      print('- Audio Output: $_hasAudioOutput');
+
+      // Log thông tin chi tiết về thiết bị
+      print('\nDetailed device information:');
+      for (var device in devices) {
+        print('- ${device.kind}: ${device.label}');
+      }
+
+      if (!_hasAudioInput) {
+        throw Exception('Không tìm thấy microphone');
+      }
+
+      if (!_hasVideoInput) {
+        // Có thể cho phép cuộc gọi audio
+        print('Warning: No camera found, falling back to audio only');
+      }
+
+      if (!_hasAudioOutput) {
+        throw Exception('Không tìm thấy thiết bị âm thanh đầu ra');
+      }
+
+      return true;
+    } catch (e) {
+      print('Device compatibility check failed: $e');
+      _showErrorDialog('Lỗi thiết bị', e.toString());
+      return false;
+    }
+  }
+
+  void _showErrorDialog(String title, String message) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text(title),
+          content: Text(message),
+          actions: <Widget>[
+            TextButton(
+              child: const Text('Đóng'),
+              onPressed: () {
+                Navigator.of(context).pop();
+                Navigator.of(context).pop(); // Thoát màn hình cuộc gọi
+              },
+            ),
+          ],
+        );
+      },
+    );
   }
 
   void _setupAutoEndTimer() {
@@ -112,11 +202,14 @@ class _CallScreenState extends State<CallScreen> {
           'echoCancellation': true,
           'noiseSuppression': true,
           'autoGainControl': true,
+          'sampleRate': 48000,
+          'channelCount': 2,
         },
         'video': {
           'facingMode': _isUsingFrontCamera ? 'user' : 'environment',
           'width': {'ideal': 1280},
           'height': {'ideal': 720},
+          'frameRate': {'ideal': 30},
         },
       };
 
@@ -124,32 +217,25 @@ class _CallScreenState extends State<CallScreen> {
         mediaConstraints,
       );
 
-      print('=== Audio Track Information ===');
-      final audioTracks = stream.getAudioTracks();
-      print('Number of audio tracks: ${audioTracks.length}');
-      audioTracks.forEach((track) {
-        print('Audio track ID: ${track.id}');
-        print('Audio track enabled: ${track.enabled}');
-        print('Audio track kind: ${track.kind}');
-        print('Audio track label: ${track.label}');
-      });
+      // Log thông tin audio tracks
+      _logAudioTracks(stream);
 
       // Lưu audio track để dễ quản lý
-      _audioTrack = stream.getAudioTracks().first;
-      print('Main audio track saved: ${_audioTrack?.id}');
+      if (stream.getAudioTracks().isNotEmpty) {
+        _audioTrack = stream.getAudioTracks().first;
+        _audioTrack?.enabled = !_isMicMuted;
+        print('Main audio track saved: ${_audioTrack?.id}');
+      }
 
       // Gán stream vào renderer
       _localRenderer.srcObject = stream;
       print('Stream assigned to local renderer');
 
-      // Đặt trạng thái ban đầu của tracks
+      // Đặt trạng thái ban đầu của video tracks
       stream.getVideoTracks().forEach((track) {
         track.enabled = _isVideoEnabled;
         print('Video track ${track.id} enabled: ${track.enabled}');
       });
-
-      _audioTrack?.enabled = !_isMicMuted;
-      print('Audio track enabled: ${_audioTrack?.enabled}');
 
       if (mounted) {
         setState(() {});
@@ -157,10 +243,20 @@ class _CallScreenState extends State<CallScreen> {
       }
     } catch (e) {
       print('❌ Error setting up local stream: $e');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Không thể khởi tạo thiết bị: $e')),
-      );
+      _showErrorDialog('Lỗi khởi tạo', 'Không thể khởi tạo thiết bị: $e');
     }
+  }
+
+  void _logAudioTracks(MediaStream stream) {
+    print('=== Audio Track Information ===');
+    final audioTracks = stream.getAudioTracks();
+    print('Number of audio tracks: ${audioTracks.length}');
+    audioTracks.forEach((track) {
+      print('Audio track ID: ${track.id}');
+      print('Audio track enabled: ${track.enabled}');
+      print('Audio track kind: ${track.kind}');
+      print('Audio track label: ${track.label}');
+    });
   }
 
   void _setupCallListener() {
@@ -565,81 +661,53 @@ class _CallScreenState extends State<CallScreen> {
   }
 
   void _toggleMic() {
-    print('=== Toggling microphone ===');
-    setState(() => _isMicMuted = !_isMicMuted);
-
-    if (_audioTrack != null) {
-      _audioTrack!.enabled = !_isMicMuted;
-      print('Audio track ID: ${_audioTrack!.id}');
-      print('Audio track enabled: ${_audioTrack!.enabled}');
-      print('Audio track kind: ${_audioTrack!.kind}');
-      print('Audio track label: ${_audioTrack!.label}');
-
-      // Kiểm tra stream hiện tại
-      if (_localRenderer.srcObject != null) {
-        final localStream = _localRenderer.srcObject as MediaStream;
-        final audioTracks = localStream.getAudioTracks();
-        print('Current stream audio tracks: ${audioTracks.length}');
-        audioTracks.forEach((track) {
-          print('Stream audio track enabled: ${track.enabled}');
-        });
+    try {
+      setState(() => _isMicMuted = !_isMicMuted);
+      if (_audioTrack != null) {
+        _audioTrack!.enabled = !_isMicMuted;
+        _showDeviceStatusSnackbar(
+          _isMicMuted ? 'Đã tắt microphone' : 'Đã bật microphone',
+        );
+      } else {
+        throw Exception('Không tìm thấy microphone');
       }
-    } else {
-      print('❌ Warning: Audio track is null');
+    } catch (e) {
+      _showDeviceStatusSnackbar('Lỗi khi thay đổi trạng thái microphone: $e');
     }
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(_isMicMuted ? 'Đã tắt mic' : 'Đã bật mic'),
-        duration: Duration(seconds: 1),
-      ),
-    );
   }
 
   void _toggleVideo() {
-    setState(() => _isVideoEnabled = !_isVideoEnabled);
-
-    // Bật/tắt video track
-    if (_localRenderer.srcObject != null) {
-      final localStream = _localRenderer.srcObject as MediaStream;
-      localStream.getVideoTracks().forEach((track) {
-        track.enabled = _isVideoEnabled;
-      });
+    try {
+      setState(() => _isVideoEnabled = !_isVideoEnabled);
+      if (_localRenderer.srcObject != null) {
+        final localStream = _localRenderer.srcObject as MediaStream;
+        localStream.getVideoTracks().forEach((track) {
+          track.enabled = _isVideoEnabled;
+        });
+        _showDeviceStatusSnackbar(
+          _isVideoEnabled ? 'Đã bật camera' : 'Đã tắt camera',
+        );
+      }
+    } catch (e) {
+      _showDeviceStatusSnackbar('Lỗi khi thay đổi trạng thái camera: $e');
     }
   }
 
   void _toggleSpeaker() async {
     try {
-      if (_remoteRenderer.srcObject != null) {
-        final stream = _remoteRenderer.srcObject as MediaStream;
+      setState(() => _isSpeakerOn = !_isSpeakerOn);
 
-        // Lấy audio element từ remote renderer
-        final audioTracks = stream.getAudioTracks();
-        if (audioTracks.isNotEmpty) {
-          // Thay đổi trạng thái loa
-          setState(() => _isSpeakerOn = !_isSpeakerOn);
+      // Áp dụng thay đổi cho audio output
+      await Helper.selectAudioOutput(_isSpeakerOn ? 'speaker' : 'earpiece');
 
-          // Áp dụng thay đổi cho audio output
-          await Helper.selectAudioOutput(_isSpeakerOn ? 'speaker' : 'earpiece');
+      _showDeviceStatusSnackbar(
+        _isSpeakerOn ? 'Đã bật loa ngoài' : 'Đã tắt loa ngoài',
+      );
 
-          // Thông báo trạng thái loa
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                _isSpeakerOn ? 'Đã bật loa ngoài' : 'Đã tắt loa ngoài',
-              ),
-              duration: Duration(seconds: 1),
-            ),
-          );
-
-          print("Speaker ${_isSpeakerOn ? 'enabled' : 'disabled'}");
-        }
-      }
+      print("Speaker ${_isSpeakerOn ? 'enabled' : 'disabled'}");
     } catch (e) {
       print('Error toggling speaker: $e');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Không thể thay đổi trạng thái loa: $e')),
-      );
+      _showDeviceStatusSnackbar('Không thể thay đổi trạng thái loa: $e');
     }
   }
 
@@ -676,22 +744,28 @@ class _CallScreenState extends State<CallScreen> {
     _isDisposed = true;
 
     try {
+      // Hủy các timers
       _timer.cancel();
       _autoEndTimer.cancel();
       _callStateSubscription.cancel();
+
+      // Dừng âm thanh
       _audioService.stopRingtone();
       _signaling.endCall();
 
-      // Reset audio output về mặc định
+      // Reset audio output
       Helper.selectAudioOutput('earpiece').catchError((e) {
         print('Error resetting audio output: $e');
       });
 
-      // Tắt audio track
-      _audioTrack?.stop();
-      _audioTrack = null;
+      // Cleanup audio track
+      if (_audioTrack != null) {
+        _audioTrack!.stop();
+        _audioTrack!.enabled = false;
+        _audioTrack = null;
+      }
 
-      // Tắt local stream
+      // Cleanup local stream
       if (_localRenderer.srcObject != null) {
         final localStream = _localRenderer.srcObject as MediaStream;
         localStream.getTracks().forEach((track) {
@@ -701,7 +775,7 @@ class _CallScreenState extends State<CallScreen> {
         _localRenderer.srcObject = null;
       }
 
-      // Tắt remote stream
+      // Cleanup remote stream
       if (_remoteRenderer.srcObject != null) {
         final remoteStream = _remoteRenderer.srcObject as MediaStream;
         remoteStream.getTracks().forEach((track) {
@@ -711,8 +785,15 @@ class _CallScreenState extends State<CallScreen> {
         _remoteRenderer.srcObject = null;
       }
 
-      _remoteRenderer.dispose();
+      // Dispose renderers
       _localRenderer.dispose();
+      _remoteRenderer.dispose();
+
+      // Đóng peer connection
+      if (peerConnection != null) {
+        peerConnection!.close();
+        peerConnection = null;
+      }
     } catch (e) {
       print("Error in dispose: $e");
     }
@@ -730,5 +811,52 @@ class _CallScreenState extends State<CallScreen> {
         _isUsingFrontCamera = !_isUsingFrontCamera;
       });
     }
+  }
+
+  // Thêm hàm theo dõi chất lượng kết nối
+  void _monitorConnectionQuality() {
+    if (_signaling.peerConnection != null) {
+      Timer.periodic(Duration(seconds: 3), (timer) async {
+        if (!mounted) {
+          timer.cancel();
+          return;
+        }
+
+        try {
+          final stats = await _signaling.peerConnection!.getStats();
+          stats.forEach((report) {
+            if (report.type == 'inbound-rtp') {
+              print('=== Connection Quality Stats ===');
+              print('- Packets Lost: ${report.values['packetsLost']}');
+              print('- Jitter: ${report.values['jitter']}');
+              print('- Round Trip Time: ${report.values['roundTripTime']}');
+
+              if (report.values['packetsLost'] > 100) {
+                _showDeviceStatusSnackbar('Chất lượng kết nối kém');
+              }
+            }
+          });
+        } catch (e) {
+          print('Error getting connection stats: $e');
+        }
+      });
+    }
+  }
+
+  void _showDeviceStatusSnackbar(String message) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        duration: Duration(seconds: 3),
+        action: SnackBarAction(
+          label: 'Đóng',
+          onPressed: () {
+            ScaffoldMessenger.of(context).hideCurrentSnackBar();
+          },
+        ),
+      ),
+    );
   }
 }
