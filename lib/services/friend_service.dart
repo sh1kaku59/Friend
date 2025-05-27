@@ -86,7 +86,7 @@ class FriendService {
     DatabaseReference usersRef = _db.child("users");
 
     // 🔍 In ra email cần tìm
-    print("Email tìm kiếm trước khi xử lý: $email");
+    // print("Email tìm kiếm trước khi xử lý: $email");
 
     // 🛠 Kiểm tra xem email có phải là một địa chỉ email hợp lệ không
     if (!email.contains("@") || !email.contains(".")) {
@@ -150,7 +150,7 @@ class FriendService {
         .child(receiverUid)
         .set(true);
 
-    print("✅ Đã gửi lời mời kết bạn!");
+    // print("✅ Đã gửi lời mời kết bạn!");
   }
 
   /// 📩 Lấy danh sách yêu cầu kết bạn đến userId
@@ -195,5 +195,25 @@ class FriendService {
     await _db.child("friends/$friendId/$userId").remove();
 
     print("❌ Đã xóa bạn bè!");
+  }
+
+  /// 🔒 Chặn người dùng
+  Future<void> blockUser(String userId, String blockedUserId) async {
+    await _db.child('blocked_users/$userId/$blockedUserId').set({
+      'blockedAt': ServerValue.timestamp,
+      'status': 'blocked',
+    });
+  }
+
+  /// �� Bỏ chặn người dùng
+  Future<void> unblockUser(String userId, String blockedUserId) async {
+    await _db.child('blocked_users/$userId/$blockedUserId').remove();
+  }
+
+  /// 🔍 Kiểm tra người dùng có bị chặn không
+  Future<bool> isUserBlocked(String userId, String blockedUserId) async {
+    final blockedSnapshot =
+        await _db.child('blocked_users/$userId/$blockedUserId').get();
+    return blockedSnapshot.exists;
   }
 }

@@ -533,9 +533,8 @@ class _FriendListScreenState extends State<FriendListScreen> {
       if (confirm != true) return;
       if (currentUserId == null) return;
 
-      await FirebaseDatabase.instance
-          .ref('blocked_users/$currentUserId/$friendId')
-          .set({'blockedAt': ServerValue.timestamp, 'status': 'blocked'});
+      // Chặn bạn bè tạm thời đưa vào danh sách bị chặn
+      await _friendService.blockUser(currentUserId!, friendId);
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -545,7 +544,7 @@ class _FriendListScreenState extends State<FriendListScreen> {
 
       setState(() {});
     } catch (e) {
-      print('Lỗi khi chặn người dùng: $e');
+      // print('Lỗi khi chặn người dùng: $e');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Có lỗi xảy ra khi chặn người dùng')),
@@ -560,9 +559,7 @@ class _FriendListScreenState extends State<FriendListScreen> {
       if (currentUserId == null) return;
 
       // Xóa khỏi danh sách người bị chặn
-      await FirebaseDatabase.instance
-          .ref('blocked_users/$currentUserId/$friendId')
-          .remove();
+      await _friendService.unblockUser(currentUserId!, friendId);
 
       // Hiển thị thông báo thành công
       if (mounted) {
@@ -574,7 +571,7 @@ class _FriendListScreenState extends State<FriendListScreen> {
       // Refresh UI
       setState(() {});
     } catch (e) {
-      print('Lỗi khi bỏ chặn người dùng: $e');
+      // print('Lỗi khi bỏ chặn người dùng: $e');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Có lỗi xảy ra khi bỏ chặn người dùng')),
@@ -586,18 +583,7 @@ class _FriendListScreenState extends State<FriendListScreen> {
   /// **🔒 Kiểm tra xem người dùng có bị chặn không**
   Future<bool> _isUserBlocked(String friendId) async {
     if (currentUserId == null) return false;
-
-    try {
-      final blockedSnapshot =
-          await FirebaseDatabase.instance
-              .ref('blocked_users/$currentUserId/$friendId')
-              .get();
-
-      return blockedSnapshot.exists;
-    } catch (e) {
-      print('Lỗi khi kiểm tra trạng thái block: $e');
-      return false;
-    }
+    return await _friendService.isUserBlocked(currentUserId!, friendId);
   }
 
   @override
