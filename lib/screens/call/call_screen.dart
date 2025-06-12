@@ -1,616 +1,454 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
-import '../../services/signaling.dart';
-import '../../services/audio_service.dart';
-import 'package:flutter_webrtc/flutter_webrtc.dart';
+import '../../services/callservice.dart';
+import 'package:livekit_client/livekit_client.dart' as livekit;
+import 'package:livekit_client/livekit_client.dart' show CancelListenFunc;
 import 'package:firebase_database/firebase_database.dart';
-import 'package:permission_handler/permission_handler.dart';
+import 'package:just_audio/just_audio.dart';
 
 class CallScreen extends StatefulWidget {
-  final String friendId;
-  final String friendName;
-  final String friendAvatarUrl;
-  final String appointmentId; // Thêm appointmentId
-  final bool isIncomingCall;
+  final String callId;
+  final String userId;
+  final bool isIncoming;
+  final String type;
 
   const CallScreen({
-    super.key,
-    required this.friendId,
-    required this.friendName,
-    required this.friendAvatarUrl,
-    required this.appointmentId, // Truyền appointmentId
-    this.isIncomingCall = false,
-  });
+    Key? key,
+    required this.callId,
+    required this.userId,
+    required this.isIncoming,
+    required this.type,
+  }) : super(key: key);
 
   @override
-  _CallScreenState createState() => _CallScreenState();
+  State<CallScreen> createState() => _CallScreenState();
 }
 
-class _CallScreenState extends State<CallScreen> {
-  late Timer _timer;
-  late Timer _autoEndTimer;
-  int _callDuration = 0;
-  bool _isCallAccepted = false; // Trạng thái cuộc gọi
-  final Signaling _signaling = Signaling();
-  final AudioService _audioService = AudioService();
-  final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
-  final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
+class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
+  final CallService _callService = CallService();
+  livekit.Room? _room;
+  livekit.LocalParticipant? _localParticipant;
+  livekit.RemoteParticipant? _remoteParticipant;
   bool _isMicMuted = false;
   bool _isVideoEnabled = true;
   bool _isSpeakerOn = true;
-  late StreamSubscription _callStateSubscription;
+  bool _isFrontCamera = true;
+  int _callDuration = 0;
+  Timer? _timer;
+  late Timer _autoEndTimer;
+  CancelListenFunc? _roomEventSub;
   bool _isDisposed = false;
+  bool _isInitialized = false;
+  late livekit.ConnectionState _currentConnectionState;
+  static const Duration _callTimeout = Duration(minutes: 30);
+  static const Duration _timerInterval = Duration(seconds: 1);
+  final AudioPlayer _ringtonePlayer = AudioPlayer();
+  final AudioPlayer _callEndPlayer = AudioPlayer();
+  bool _isRinging = false;
+
   String _formatDuration(int seconds) {
     final minutes = (seconds ~/ 60).toString().padLeft(2, '0');
     final secs = (seconds % 60).toString().padLeft(2, '0');
     return '$minutes:$secs';
   }
 
-  // Thêm biến để theo dõi trạng thái audio track
-  MediaStreamTrack? _audioTrack;
-
-  // Thêm biến để theo dõi camera trước/sau
-  bool _isUsingFrontCamera = true;
-
-  // Thêm biến để theo dõi vị trí của camera nhỏ
-  Offset _localVideoPosition = Offset(20, 20);
-
-  // Thêm biến để theo dõi trạng thái thiết bị
-  bool _hasAudioInput = false;
-  bool _hasVideoInput = false;
-  bool _hasAudioOutput = false;
-
-  // Thêm biến peerConnection
-  RTCPeerConnection? peerConnection;
-
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _currentConnectionState = livekit.ConnectionState.disconnected;
+    _autoEndTimer = Timer(_callTimeout, () {
+      if (mounted) {
+        _endCall();
+      }
+    });
+    _initializeAudio();
     _initializeCall();
+  }
+
+  @override
+  void dispose() {
+    _cleanup();
+    WidgetsBinding.instance.removeObserver(this);
+    if (_isDisposed) return;
+    _isDisposed = true;
+
+    try {
+      _timer?.cancel();
+      _autoEndTimer?.cancel();
+      _roomEventSub?.call();
+      _ringtonePlayer.dispose();
+      _callEndPlayer.dispose();
+      if (_room != null) {
+        _room!.disconnect();
+      }
+    } catch (e) {
+      print("Error in dispose: $e");
+    }
+
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused) {
+      _localParticipant?.setCameraEnabled(false);
+      _localParticipant?.setMicrophoneEnabled(false);
+    } else if (state == AppLifecycleState.resumed) {
+      if (_isVideoEnabled) {
+        _localParticipant?.setCameraEnabled(true);
+      }
+      if (!_isMicMuted) {
+        _localParticipant?.setMicrophoneEnabled(true);
+      }
+    }
+  }
+
+  void _handleConnectionState(livekit.ConnectionState state) {
+    if (!mounted) return;
+
+    switch (state) {
+      case livekit.ConnectionState.disconnected:
+        _showReconnectingDialog();
+        break;
+      case livekit.ConnectionState.connected:
+        _hideReconnectingDialog();
+        break;
+      case livekit.ConnectionState.reconnecting:
+        _showErrorDialog('Đang kết nối lại...');
+        break;
+      case livekit.ConnectionState.connecting:
+        _showErrorDialog('Đang kết nối...');
+        break;
+    }
+    setState(() {
+      _currentConnectionState = state;
+    });
+  }
+
+  Future<void> _initializeAudio() async {
+    try {
+      // Khởi tạo ringtone
+      await _ringtonePlayer.setAsset('assets/sounds/ringtone.mp3');
+      await _ringtonePlayer.setLoopMode(LoopMode.one);
+
+      // Khởi tạo âm thanh kết thúc cuộc gọi
+      await _callEndPlayer.setAsset('assets/sounds/call_end.mp3');
+    } catch (e) {
+      print('Error initializing audio: $e');
+    }
+  }
+
+  Future<void> _startRinging() async {
+    if (!_isRinging) {
+      try {
+        await _ringtonePlayer.play();
+        setState(() => _isRinging = true);
+      } catch (e) {
+        print('Error playing ringtone: $e');
+      }
+    }
+  }
+
+  Future<void> _stopRinging() async {
+    if (_isRinging) {
+      try {
+        await _ringtonePlayer.stop();
+        setState(() => _isRinging = false);
+      } catch (e) {
+        print('Error stopping ringtone: $e');
+      }
+    }
+  }
+
+  Future<void> _playCallEndSound() async {
+    try {
+      await _callEndPlayer.play();
+    } catch (e) {
+      print('Error playing call end sound: $e');
+    }
   }
 
   Future<void> _initializeCall() async {
     try {
-      // Kiểm tra thiết bị trước
-      bool deviceReady = await _checkDeviceCompatibility();
-      if (!deviceReady) return;
+      final callSnapshot =
+          await FirebaseDatabase.instance.ref('calls/${widget.callId}').get();
 
-      // Khởi tạo renderers
-      await _initRenderers();
-
-      // Thiết lập local stream
-      _setupLocalStream();
-
-      // Thiết lập các listeners
-      _setupCallStateListener();
-      _setupCallListener();
-      _setupAutoEndTimer();
-
-      // Khởi tạo audio output
-      _initializeAudioOutput();
-
-      // Bắt đầu theo dõi chất lượng kết nối
-      _monitorConnectionQuality();
-    } catch (e) {
-      print('Error initializing call: $e');
-      _showErrorDialog('Lỗi khởi tạo cuộc gọi', e.toString());
-    }
-  }
-
-  Future<bool> _checkDeviceCompatibility() async {
-    try {
-      print('Checking device compatibility...');
-
-      // Kiểm tra quyền truy cập
-      Map<Permission, PermissionStatus> permissions =
-          await [Permission.camera, Permission.microphone].request();
-
-      if (!permissions[Permission.camera]!.isGranted ||
-          !permissions[Permission.microphone]!.isGranted) {
-        throw Exception('Cần cấp quyền truy cập camera và microphone');
-      }
-
-      // Kiểm tra các thiết bị có sẵn
-      List<MediaDeviceInfo> devices =
-          await navigator.mediaDevices.enumerateDevices();
-
-      _hasAudioInput = devices.any((d) => d.kind == 'audioinput');
-      _hasVideoInput = devices.any((d) => d.kind == 'videoinput');
-      _hasAudioOutput = devices.any((d) => d.kind == 'audiooutput');
-
-      print('Device check results:');
-      print('- Audio Input: $_hasAudioInput');
-      print('- Video Input: $_hasVideoInput');
-      print('- Audio Output: $_hasAudioOutput');
-
-      // Log thông tin chi tiết về thiết bị
-      print('\nDetailed device information:');
-      for (var device in devices) {
-        print('- ${device.kind}: ${device.label}');
-      }
-
-      if (!_hasAudioInput) {
-        throw Exception('Không tìm thấy microphone');
-      }
-
-      if (!_hasVideoInput) {
-        // Có thể cho phép cuộc gọi audio
-        print('Warning: No camera found, falling back to audio only');
-      }
-
-      if (!_hasAudioOutput) {
-        throw Exception('Không tìm thấy thiết bị âm thanh đầu ra');
-      }
-
-      return true;
-    } catch (e) {
-      print('Device compatibility check failed: $e');
-      _showErrorDialog('Lỗi thiết bị', e.toString());
-      return false;
-    }
-  }
-
-  void _showErrorDialog(String title, String message) {
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          title: Text(title),
-          content: Text(message),
-          actions: <Widget>[
-            TextButton(
-              child: const Text('Đóng'),
-              onPressed: () {
-                Navigator.of(context).pop();
-                Navigator.of(context).pop(); // Thoát màn hình cuộc gọi
-              },
-            ),
-          ],
-        );
-      },
-    );
-  }
-
-  void _setupAutoEndTimer() {
-    if (!widget.isIncomingCall) {
-      _autoEndTimer = Timer(Duration(minutes: 1), () {
-        if (!_isCallAccepted && mounted) {
-          _endCall();
-        }
-      });
-    }
-  }
-
-  void _setupLocalStream() async {
-    try {
-      print('=== Setting up local stream ===');
-
-      // Tắt stream cũ nếu có
-      if (_localRenderer.srcObject != null) {
-        final localStream = _localRenderer.srcObject as MediaStream;
-        print('Stopping old tracks...');
-        localStream.getTracks().forEach((track) {
-          track.stop();
-          track.enabled = false;
-        });
-      }
-
-      print('Requesting media with constraints...');
-      final Map<String, dynamic> mediaConstraints = {
-        'audio': {
-          'echoCancellation': true,
-          'noiseSuppression': true,
-          'autoGainControl': true,
-          'sampleRate': 48000,
-          'channelCount': 2,
-        },
-        'video': {
-          'facingMode': _isUsingFrontCamera ? 'user' : 'environment',
-          'width': {'ideal': 1280},
-          'height': {'ideal': 720},
-          'frameRate': {'ideal': 30},
-        },
-      };
-
-      MediaStream stream = await navigator.mediaDevices.getUserMedia(
-        mediaConstraints,
-      );
-
-      // Log thông tin audio tracks
-      _logAudioTracks(stream);
-
-      // Lưu audio track để dễ quản lý
-      if (stream.getAudioTracks().isNotEmpty) {
-        _audioTrack = stream.getAudioTracks().first;
-        _audioTrack?.enabled = !_isMicMuted;
-        print('Main audio track saved: ${_audioTrack?.id}');
-      }
-
-      // Gán stream vào renderer
-      _localRenderer.srcObject = stream;
-      print('Stream assigned to local renderer');
-
-      // Đặt trạng thái ban đầu của video tracks
-      stream.getVideoTracks().forEach((track) {
-        track.enabled = _isVideoEnabled;
-        print('Video track ${track.id} enabled: ${track.enabled}');
-      });
-
-      if (mounted) {
-        setState(() {});
-        print('State updated');
-      }
-    } catch (e) {
-      print('❌ Error setting up local stream: $e');
-      _showErrorDialog('Lỗi khởi tạo', 'Không thể khởi tạo thiết bị: $e');
-    }
-  }
-
-  void _logAudioTracks(MediaStream stream) {
-    print('=== Audio Track Information ===');
-    final audioTracks = stream.getAudioTracks();
-    print('Number of audio tracks: ${audioTracks.length}');
-    audioTracks.forEach((track) {
-      print('Audio track ID: ${track.id}');
-      print('Audio track enabled: ${track.enabled}');
-      print('Audio track kind: ${track.kind}');
-      print('Audio track label: ${track.label}');
-    });
-  }
-
-  void _setupCallListener() {
-    FirebaseDatabase.instance
-        .ref('calls/${widget.appointmentId}')
-        .onValue
-        .listen((event) {
-          if (!mounted) return;
-
-          if (event.snapshot.value == null) {
-            Navigator.pop(context);
-            return;
-          }
-
-          final data = event.snapshot.value as Map<dynamic, dynamic>;
-          if (data['status'] == 'ended') {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text("Cuộc gọi đã kết thúc")),
-            );
-            _cleanupAndExit();
-          } else if (data['status'] == 'accepted' && !_isCallAccepted) {
-            setState(() {
-              _isCallAccepted = true;
-            });
-            _startCallTimer();
-            _audioService.stopRingtone();
-          }
-        });
-  }
-
-  Future<void> _initRenderers() async {
-    await _localRenderer.initialize();
-    await _remoteRenderer.initialize();
-    if (widget.isIncomingCall) {
-      _audioService.playRingtone();
-    }
-  }
-
-  void _setupCallStateListener() {
-    print('=== Setting up call state listener ===');
-    _callStateSubscription = _signaling.callStateStream.listen((state) {
-      print('Received call state event: ${state['event']}');
-
-      if (!mounted) {
-        print('Widget not mounted, ignoring event');
+      if (!callSnapshot.exists) {
+        _endCall();
         return;
       }
 
-      switch (state['event']) {
-        case 'call_accepted':
-          print('Call accepted, setting up remote stream');
-          setState(() {
-            _remoteRenderer.srcObject = state['remoteStream'];
+      final callData = callSnapshot.value as Map<dynamic, dynamic>;
+      final roomId = callData['roomId'] as String;
 
-            // Kiểm tra remote stream
-            final remoteStream = state['remoteStream'] as MediaStream;
-            print('=== Remote Stream Information ===');
-            print('Remote stream ID: ${remoteStream.id}');
-
-            final audioTracks = remoteStream.getAudioTracks();
-            print('Remote audio tracks: ${audioTracks.length}');
-            audioTracks.forEach((track) {
-              print('Remote audio track ID: ${track.id}');
-              print('Remote audio track enabled: ${track.enabled}');
-              print('Remote audio track kind: ${track.kind}');
-              print('Remote audio track label: ${track.label}');
-            });
-          });
-          break;
-        case 'call_ended':
-          print('Call ended event received');
-          Navigator.pop(context);
-          break;
-        case 'error':
-          print('Error event received: ${state['message']}');
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text(state['message'])));
-          Navigator.pop(context);
-          break;
+      // Bắt đầu phát ringtone nếu là cuộc gọi đến
+      if (widget.isIncoming) {
+        await _startRinging();
       }
-    });
-  }
 
-  void _startCallTimer() {
-    _timer = Timer.periodic(Duration(seconds: 1), (timer) {
+      // Khởi tạo LiveKit room
+      final room = await _initializeLiveKit(roomId);
+
       setState(() {
-        _callDuration++;
+        _room = room;
+        _localParticipant = room.localParticipant;
+        _isInitialized = true;
       });
+
+      _startTimers();
+    } catch (e) {
+      print('Error initializing call: $e');
+      _showErrorDialog('Failed to initialize call');
+    }
+  }
+
+  Future<livekit.Room> _initializeLiveKit(String roomId) async {
+    try {
+      final token = await _callService.getLiveKitToken(roomId, widget.userId);
+      final room = livekit.Room();
+
+      // Lắng nghe sự kiện Room
+      _roomEventSub = room.events.listen((event) {
+        print('LiveKit event: [33m[1m[4m[7m${event.runtimeType}[0m');
+        // Cập nhật connection state
+        _handleConnectionState(room.connectionState);
+        // Cập nhật remote participant (nếu có)
+        if (_room != null) {
+          final remoteParticipants = _room!.remoteParticipants;
+          setState(() {
+            _remoteParticipant =
+                remoteParticipants.values.isNotEmpty
+                    ? remoteParticipants.values.first
+                    : null;
+          });
+        }
+      });
+
+      await room.connect(
+        'wss://call-bwzw70v1.livekit.cloud',
+        token,
+        roomOptions: livekit.RoomOptions(adaptiveStream: true, dynacast: true),
+      );
+
+      // Thiết lập video track với camera trước
+      final localVideoTrack = await livekit.LocalVideoTrack.createCameraTrack();
+
+      // Thiết lập audio track
+      final localAudioTrack = await livekit.LocalAudioTrack.create();
+
+      // Publish tracks
+      await room.localParticipant?.publishVideoTrack(localVideoTrack);
+      await room.localParticipant?.publishAudioTrack(localAudioTrack);
+
+      return room;
+    } catch (e) {
+      print('Error initializing LiveKit: $e');
+      throw Exception('Failed to initialize LiveKit');
+    }
+  }
+
+  void _startTimers() {
+    _timer = Timer.periodic(_timerInterval, (_) {
+      if (!_isDisposed) {
+        setState(() => _callDuration++);
+      }
     });
   }
 
-  void _cleanupAndExit() {
-    if (_isDisposed) return;
+  void _showErrorDialog(String message) {
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      builder:
+          (context) => AlertDialog(
+            title: Text('Error'),
+            content: Text(message),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: Text('OK'),
+              ),
+            ],
+          ),
+    );
+  }
 
-    try {
-      _timer.cancel();
-      _autoEndTimer.cancel();
-      _callStateSubscription.cancel();
-      _audioService.stopRingtone();
-      _signaling.endCall();
+  Widget _buildConnectionStateIndicator() {
+    String message;
+    Color color;
 
-      // Tắt local stream
-      if (_localRenderer.srcObject != null) {
-        final localStream = _localRenderer.srcObject as MediaStream;
-        localStream.getTracks().forEach((track) {
-          track.stop();
-          track.enabled = false;
-        });
-        _localRenderer.srcObject = null;
-      }
-
-      // Tắt remote stream
-      if (_remoteRenderer.srcObject != null) {
-        final remoteStream = _remoteRenderer.srcObject as MediaStream;
-        remoteStream.getTracks().forEach((track) {
-          track.stop();
-          track.enabled = false;
-        });
-        _remoteRenderer.srcObject = null;
-      }
-
-      if (mounted) {
-        Navigator.pop(context);
-      }
-    } catch (e) {
-      print("Error in cleanup: $e");
-      if (mounted) {
-        Navigator.pop(context);
-      }
+    switch (_currentConnectionState) {
+      case livekit.ConnectionState.connecting:
+        message = 'Đang kết nối...';
+        color = Colors.orange;
+        break;
+      case livekit.ConnectionState.connected:
+        message = 'Đã kết nối';
+        color = Colors.green;
+        break;
+      case livekit.ConnectionState.reconnecting:
+        message = 'Đang kết nối lại...';
+        color = Colors.orange;
+        break;
+      case livekit.ConnectionState.disconnected:
+        message = 'Mất kết nối';
+        color = Colors.red;
+        break;
+      // default:
+      //   message = '';
+      //   color = Colors.transparent;
     }
+
+    return AnimatedContainer(
+      duration: Duration(milliseconds: 300),
+      color: color,
+      padding: EdgeInsets.symmetric(vertical: 8),
+      child: Center(
+        child: Text(message, style: TextStyle(color: Colors.white)),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    // Nếu cuộc gọi đã được chấp nhận, hiển thị giao diện video call hiện tại
-    if (_isCallAccepted) {
-      return Scaffold(
-        backgroundColor: Colors.black,
-        body: SafeArea(
-          child: Stack(
-            children: [
-              // Giữ nguyên phần code hiển thị video call
-              RTCVideoView(
-                _remoteRenderer,
-                objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
-              ),
-
-              // Local camera view (small frame) with drag feature
-              if (_isVideoEnabled)
-                Positioned(
-                  left: _localVideoPosition.dx,
-                  top: _localVideoPosition.dy,
-                  child: GestureDetector(
-                    onPanUpdate: (details) {
-                      setState(() {
-                        _localVideoPosition = Offset(
-                          _localVideoPosition.dx + details.delta.dx,
-                          _localVideoPosition.dy + details.delta.dy,
-                        );
-                      });
-                    },
-                    child: Stack(
-                      children: [
-                        Container(
-                          width: 120,
-                          height: 160,
-                          decoration: BoxDecoration(
-                            border: Border.all(color: Colors.white, width: 2),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(8),
-                            child: RTCVideoView(
-                              _localRenderer,
-                              mirror: _isUsingFrontCamera,
-                              objectFit:
-                                  RTCVideoViewObjectFit
-                                      .RTCVideoViewObjectFitCover,
-                            ),
-                          ),
-                        ),
-                        // Nút chuyển đổi camera
-                        Positioned(
-                          top: 5,
-                          right: 5,
-                          child: GestureDetector(
-                            onTap: _switchCamera,
-                            child: Container(
-                              padding: EdgeInsets.all(4),
-                              decoration: BoxDecoration(
-                                color: Colors.black.withOpacity(0.5),
-                                shape: BoxShape.circle,
-                              ),
-                              child: Icon(
-                                Icons.flip_camera_ios,
-                                color: Colors.white,
-                                size: 20,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-
-              // Controls overlay
-              Positioned(
-                bottom: 40,
-                left: 0,
-                right: 0,
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: [
-                    _buildControlButton(
-                      icon: _isMicMuted ? Icons.mic_off : Icons.mic,
-                      onPressed: _toggleMic,
-                    ),
-                    _buildControlButton(
-                      icon: Icons.call_end,
-                      backgroundColor: Colors.red,
-                      onPressed: _endCall,
-                    ),
-                    _buildControlButton(
-                      icon:
-                          _isVideoEnabled ? Icons.videocam : Icons.videocam_off,
-                      onPressed: _toggleVideo,
-                    ),
-                    _buildControlButton(
-                      icon: _isSpeakerOn ? Icons.volume_up : Icons.volume_off,
-                      onPressed: _toggleSpeaker,
-                    ),
-                  ],
-                ),
-              ),
-
-              // Caller info và Call duration với khoảng cách phù hợp
-              Positioned(
-                top: 20,
-                left: 0,
-                right: 0,
-                child: Column(
-                  children: [
-                    CircleAvatar(
-                      radius: 30,
-                      backgroundImage: NetworkImage(widget.friendAvatarUrl),
-                    ),
-                    SizedBox(height: 8),
-                    Text(
-                      widget.friendName,
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 20,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    // Thêm khoảng cách giữa tên và thời gian
-                    SizedBox(height: 20), // Tăng khoảng cách này
-                    if (_isCallAccepted)
-                      Text(
-                        _formatDuration(_callDuration),
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-
-    // Giao diện màn hình đang gọi mới (khi chưa được chấp nhận)
     return Scaffold(
       backgroundColor: Colors.black,
       body: SafeArea(
-        child: Column(
+        child: Stack(
           children: [
-            const SizedBox(height: 60),
-            // Avatar của người dùng
-            CircleAvatar(
-              radius: 50,
-              backgroundImage: NetworkImage(widget.friendAvatarUrl),
+            // Video views
+            if (_isInitialized) ...[
+              // Remote video
+              if (_remoteParticipant != null)
+                _buildRemoteVideoView(_remoteParticipant!),
+
+              // Local video
+              _buildLocalVideoView(),
+            ],
+
+            // Connection state indicator
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: _buildConnectionStateIndicator(),
             ),
-            const SizedBox(height: 24),
-            // Text "Đang gọi..."
-            const Text(
-              "Đang gọi...",
-              style: TextStyle(color: Colors.white70, fontSize: 24),
-            ),
-            const SizedBox(height: 16),
-            // Chỉ hiển thị tên người dùng
-            Text(
-              widget.friendName,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 28,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const Spacer(),
-            // Các nút điều khiển
-            Container(
-              margin: const EdgeInsets.only(bottom: 50),
+
+            // Controls
+            Positioned(
+              bottom: 40,
+              left: 0,
+              right: 0,
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                 children: [
-                  _buildCallButton(
-                    icon: _isSpeakerOn ? Icons.volume_up : Icons.volume_off,
-                    label: 'Loa ngoài',
-                    onPressed: _toggleSpeaker,
+                  _buildControlButton(
+                    icon: _isMicMuted ? Icons.mic_off : Icons.mic,
+                    onPressed: _toggleMic,
                   ),
-                  _buildCallButton(
-                    icon: Icons.videocam,
-                    label: 'FaceTime',
+                  _buildControlButton(
+                    icon: Icons.call_end,
+                    backgroundColor: Colors.red,
+                    onPressed: _endCall,
+                  ),
+                  _buildControlButton(
+                    icon: _isVideoEnabled ? Icons.videocam : Icons.videocam_off,
                     onPressed: _toggleVideo,
                   ),
-                  _buildCallButton(
-                    icon: _isMicMuted ? Icons.mic_off : Icons.mic,
-                    label: 'Tắt tiếng',
-                    onPressed: _toggleMic,
+                  _buildControlButton(
+                    icon: Icons.switch_camera,
+                    onPressed: _switchCamera,
+                  ),
+                  _buildControlButton(
+                    icon: _isSpeakerOn ? Icons.volume_up : Icons.volume_off,
+                    onPressed: _toggleSpeaker,
                   ),
                 ],
               ),
             ),
-            // Nút kết thúc cuộc gọi
-            Padding(
-              padding: const EdgeInsets.only(bottom: 40),
-              child: GestureDetector(
-                onTap: _endCall,
-                child: Container(
-                  width: 70,
-                  height: 70,
-                  decoration: const BoxDecoration(
-                    color: Colors.red,
-                    shape: BoxShape.circle,
+
+            // Caller info
+            Positioned(
+              top: 20,
+              left: 0,
+              right: 0,
+              child: Column(
+                children: [
+                  CircleAvatar(
+                    radius: 30,
+                    backgroundImage: NetworkImage(widget.userId),
                   ),
-                  child: const Icon(
-                    Icons.call_end,
-                    color: Colors.white,
-                    size: 35,
+                  SizedBox(height: 8),
+                  Text(
+                    widget.userId,
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
-                ),
+                  SizedBox(height: 20),
+                  Text(
+                    _formatDuration(_callDuration),
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
               ),
             ),
           ],
         ),
       ),
     );
+  }
+
+  Widget _buildRemoteVideoView(livekit.RemoteParticipant participant) {
+    try {
+      final videoTrackPub = participant.videoTrackPublications.firstWhere(
+        (pub) => pub.track != null,
+      );
+      final videoTrack = videoTrackPub.track as livekit.VideoTrack;
+      return Container(
+        width: MediaQuery.of(context).size.width,
+        height: MediaQuery.of(context).size.height,
+        child: livekit.VideoTrackRenderer(videoTrack),
+      );
+    } catch (e) {
+      print('Error building remote video view: $e');
+      return const SizedBox.shrink();
+    }
+  }
+
+  Widget _buildLocalVideoView() {
+    try {
+      if (_localParticipant == null) return const SizedBox.shrink();
+      final videoTrackPub = _localParticipant!.videoTrackPublications
+          .firstWhere((pub) => pub.track != null);
+      final videoTrack = videoTrackPub.track as livekit.VideoTrack;
+      return Positioned(
+        right: 20,
+        top: 20,
+        width: 120,
+        height: 160,
+        child: Container(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: Colors.white, width: 2),
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(10),
+            child: livekit.VideoTrackRenderer(videoTrack),
+          ),
+        ),
+      );
+    } catch (e) {
+      print('Error building local video view: $e');
+      return const SizedBox.shrink();
+    }
   }
 
   Widget _buildControlButton({
@@ -632,231 +470,97 @@ class _CallScreenState extends State<CallScreen> {
     );
   }
 
-  Widget _buildCallButton({
-    required IconData icon,
-    required String label,
-    required VoidCallback onPressed,
-  }) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(
-          width: 60,
-          height: 60,
-          decoration: BoxDecoration(
-            color: Colors.grey[800],
-            shape: BoxShape.circle,
-          ),
-          child: IconButton(
-            icon: Icon(icon),
-            color: Colors.white,
-            iconSize: 30,
-            onPressed: onPressed,
-          ),
-        ),
-        const SizedBox(height: 8),
-        Text(label, style: const TextStyle(color: Colors.white, fontSize: 12)),
-      ],
-    );
-  }
-
   void _toggleMic() {
-    try {
-      setState(() => _isMicMuted = !_isMicMuted);
-      if (_audioTrack != null) {
-        _audioTrack!.enabled = !_isMicMuted;
-        _showDeviceStatusSnackbar(
-          _isMicMuted ? 'Đã tắt microphone' : 'Đã bật microphone',
-        );
-      } else {
-        throw Exception('Không tìm thấy microphone');
-      }
-    } catch (e) {
-      _showDeviceStatusSnackbar('Lỗi khi thay đổi trạng thái microphone: $e');
-    }
+    setState(() => _isMicMuted = !_isMicMuted);
+    _localParticipant?.setMicrophoneEnabled(!_isMicMuted);
   }
 
   void _toggleVideo() {
-    try {
-      setState(() => _isVideoEnabled = !_isVideoEnabled);
-      if (_localRenderer.srcObject != null) {
-        final localStream = _localRenderer.srcObject as MediaStream;
-        localStream.getVideoTracks().forEach((track) {
-          track.enabled = _isVideoEnabled;
-        });
-        _showDeviceStatusSnackbar(
-          _isVideoEnabled ? 'Đã bật camera' : 'Đã tắt camera',
-        );
-      }
-    } catch (e) {
-      _showDeviceStatusSnackbar('Lỗi khi thay đổi trạng thái camera: $e');
-    }
+    setState(() => _isVideoEnabled = !_isVideoEnabled);
+    _localParticipant?.setCameraEnabled(_isVideoEnabled);
   }
 
   void _toggleSpeaker() async {
-    try {
-      setState(() => _isSpeakerOn = !_isSpeakerOn);
-
-      // Áp dụng thay đổi cho audio output
-      await Helper.selectAudioOutput(_isSpeakerOn ? 'speaker' : 'earpiece');
-
-      _showDeviceStatusSnackbar(
-        _isSpeakerOn ? 'Đã bật loa ngoài' : 'Đã tắt loa ngoài',
-      );
-
-      print("Speaker ${_isSpeakerOn ? 'enabled' : 'disabled'}");
-    } catch (e) {
-      print('Error toggling speaker: $e');
-      _showDeviceStatusSnackbar('Không thể thay đổi trạng thái loa: $e');
-    }
-  }
-
-  // Thêm hàm để khởi tạo audio output khi bắt đầu cuộc gọi
-  void _initializeAudioOutput() async {
-    try {
-      // Mặc định sử dụng loa ngoài khi bắt đầu cuộc gọi
-      await Helper.selectAudioOutput('speaker');
-      setState(() => _isSpeakerOn = true);
-    } catch (e) {
-      print('Error initializing audio output: $e');
-    }
+    setState(() => _isSpeakerOn = !_isSpeakerOn);
+    // LiveKit Flutter chưa hỗ trợ chuyển loa trực tiếp, cần dùng package ngoài nếu muốn
   }
 
   Future<void> _endCall() async {
-    if (_isDisposed) return;
-
     try {
-      // Cập nhật trạng thái cuộc gọi
-      await FirebaseDatabase.instance
-          .ref('calls/${widget.appointmentId}')
-          .update({'status': 'ended'});
-
-      _cleanupAndExit();
-    } catch (e) {
-      print("Error ending call: $e");
-      _cleanupAndExit();
-    }
-  }
-
-  @override
-  void dispose() {
-    if (_isDisposed) return;
-    _isDisposed = true;
-
-    try {
-      // Hủy các timers
-      _timer.cancel();
-      _autoEndTimer.cancel();
-      _callStateSubscription.cancel();
-
-      // Dừng âm thanh
-      _audioService.stopRingtone();
-      _signaling.endCall();
-
-      // Reset audio output
-      Helper.selectAudioOutput('earpiece').catchError((e) {
-        print('Error resetting audio output: $e');
-      });
-
-      // Cleanup audio track
-      if (_audioTrack != null) {
-        _audioTrack!.stop();
-        _audioTrack!.enabled = false;
-        _audioTrack = null;
-      }
-
-      // Cleanup local stream
-      if (_localRenderer.srcObject != null) {
-        final localStream = _localRenderer.srcObject as MediaStream;
-        localStream.getTracks().forEach((track) {
-          track.stop();
-          track.enabled = false;
-        });
-        _localRenderer.srcObject = null;
-      }
-
-      // Cleanup remote stream
-      if (_remoteRenderer.srcObject != null) {
-        final remoteStream = _remoteRenderer.srcObject as MediaStream;
-        remoteStream.getTracks().forEach((track) {
-          track.stop();
-          track.enabled = false;
-        });
-        _remoteRenderer.srcObject = null;
-      }
-
-      // Dispose renderers
-      _localRenderer.dispose();
-      _remoteRenderer.dispose();
-
-      // Đóng peer connection
-      if (peerConnection != null) {
-        peerConnection!.close();
-        peerConnection = null;
+      await _stopRinging();
+      await _playCallEndSound();
+      await _callService.updateCallStatus(widget.callId, 'ended');
+      await _room!.disconnect();
+      if (mounted) {
+        Navigator.pop(context);
       }
     } catch (e) {
-      print("Error in dispose: $e");
-    }
-
-    super.dispose();
-  }
-
-  // Thêm method để chuyển đổi camera:
-  void _switchCamera() async {
-    if (_localRenderer.srcObject != null) {
-      final stream = _localRenderer.srcObject as MediaStream;
-      final videoTrack = stream.getVideoTracks().first;
-      await Helper.switchCamera(videoTrack);
-      setState(() {
-        _isUsingFrontCamera = !_isUsingFrontCamera;
-      });
+      print('Error ending call: $e');
+      _showErrorDialog('Failed to end call properly');
     }
   }
 
-  // Thêm hàm theo dõi chất lượng kết nối
-  void _monitorConnectionQuality() {
-    if (_signaling.peerConnection != null) {
-      Timer.periodic(Duration(seconds: 3), (timer) async {
-        if (!mounted) {
-          timer.cancel();
-          return;
-        }
-
-        try {
-          final stats = await _signaling.peerConnection!.getStats();
-          stats.forEach((report) {
-            if (report.type == 'inbound-rtp') {
-              print('=== Connection Quality Stats ===');
-              print('- Packets Lost: ${report.values['packetsLost']}');
-              print('- Jitter: ${report.values['jitter']}');
-              print('- Round Trip Time: ${report.values['roundTripTime']}');
-
-              if (report.values['packetsLost'] > 100) {
-                _showDeviceStatusSnackbar('Chất lượng kết nối kém');
-              }
-            }
-          });
-        } catch (e) {
-          print('Error getting connection stats: $e');
-        }
-      });
-    }
-  }
-
-  void _showDeviceStatusSnackbar(String message) {
-    if (!mounted) return;
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        duration: Duration(seconds: 3),
-        action: SnackBarAction(
-          label: 'Đóng',
-          onPressed: () {
-            ScaffoldMessenger.of(context).hideCurrentSnackBar();
-          },
-        ),
-      ),
+  void _showReconnectingDialog() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder:
+          (context) => AlertDialog(
+            title: Text('Reconnecting'),
+            content: Text('Attempting to reconnect to the call...'),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  Navigator.pop(context);
+                  _endCall();
+                },
+                child: Text('End Call'),
+              ),
+            ],
+          ),
     );
+  }
+
+  void _hideReconnectingDialog() {
+    if (!mounted) return;
+    Navigator.of(context).popUntil((route) => route.isFirst);
+  }
+
+  Future<void> _cleanup() async {
+    try {
+      await _stopRinging();
+      if (_room != null) {
+        if (_localParticipant != null) {
+          await _localParticipant!.unpublishAllTracks();
+        }
+        await _room!.disconnect();
+        await _callService.handleCallEnded(widget.callId);
+        _roomEventSub?.call();
+      }
+    } catch (e) {
+      print('Error during cleanup: $e');
+    }
+  }
+
+  Future<void> _switchCamera() async {
+    if (_localParticipant == null) return;
+
+    try {
+      // Unpublish video track hiện tại
+      await _localParticipant!.unpublishAllTracks();
+
+      // Tạo video track mới với camera ngược lại
+      final newVideoTrack = await livekit.LocalVideoTrack.createCameraTrack();
+
+      // Publish video track mới
+      await _localParticipant!.publishVideoTrack(newVideoTrack);
+
+      setState(() {
+        _isFrontCamera = !_isFrontCamera;
+      });
+    } catch (e) {
+      print('Error switching camera: $e');
+      _showErrorDialog('Failed to switch camera');
+    }
   }
 }

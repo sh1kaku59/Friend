@@ -1,62 +1,167 @@
 import 'package:flutter/material.dart';
-import '../../services/signaling.dart';
 import 'call_screen.dart';
-import 'package:firebase_database/firebase_database.dart';
+// import 'package:firebase_database/firebase_database.dart';
 import 'dart:async';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import '../../services/callservice.dart';
+import 'package:just_audio/just_audio.dart';
+import '../../services/call_animation_service.dart';
 
 class IncomingCallScreen extends StatefulWidget {
+  final String callId;
+  final String callerId;
   final String callerName;
-  final String callerAvatarUrl;
-  final String appointmentId;
+  final String callerAvatar;
+  final String type;
 
   const IncomingCallScreen({
-    super.key,
+    Key? key,
+    required this.callId,
+    required this.callerId,
     required this.callerName,
-    required this.callerAvatarUrl,
-    required this.appointmentId,
-  });
+    required this.callerAvatar,
+    required this.type,
+  }) : super(key: key);
 
   @override
-  _IncomingCallScreenState createState() => _IncomingCallScreenState();
+  State<IncomingCallScreen> createState() => _IncomingCallScreenState();
 }
 
-class _IncomingCallScreenState extends State<IncomingCallScreen> {
-  final Signaling _signaling = Signaling();
-  late StreamSubscription _callSubscription;
+class _IncomingCallScreenState extends State<IncomingCallScreen>
+    with SingleTickerProviderStateMixin {
+  final CallService _callService = CallService();
+  final CallAnimationService _animationService = CallAnimationService();
+  Timer? _callTimeout;
+  StreamSubscription? _callStateSubscription;
+  final AudioPlayer _ringtonePlayer = AudioPlayer();
+  bool _isRinging = false;
+  late AnimationController _animationController;
+  late Animation<double> _scaleAnimation;
+  late Animation<double> _opacityAnimation;
 
   @override
   void initState() {
     super.initState();
+    _initializeRingtone();
     _setupCallListener();
+    _initializeAnimations();
+    _startIncomingCallEffects();
+    // Tự động từ chối sau 30 giây
+    _callTimeout = Timer(Duration(seconds: 30), () {
+      if (mounted) {
+        _callService.updateCallStatus(widget.callId, 'rejected');
+        Navigator.pop(context);
+      }
+    });
+  }
+
+  void _initializeAnimations() {
+    _animationController = AnimationController(
+      duration: Duration(seconds: 2),
+      vsync: this,
+    )..repeat(reverse: true);
+
+    _scaleAnimation = Tween<double>(begin: 1.0, end: 1.2).animate(
+      CurvedAnimation(parent: _animationController, curve: Curves.easeInOut),
+    );
+
+    _opacityAnimation = Tween<double>(begin: 0.5, end: 1.0).animate(
+      CurvedAnimation(parent: _animationController, curve: Curves.easeInOut),
+    );
+  }
+
+  Future<void> _startIncomingCallEffects() async {
+    await _animationService.startVibration();
+  }
+
+  Future<void> _initializeRingtone() async {
+    try {
+      await _ringtonePlayer.setAsset('assets/sounds/ringtone.mp3');
+      await _ringtonePlayer.setLoopMode(LoopMode.one);
+      await _startRinging();
+    } catch (e) {
+      print('Error initializing ringtone: $e');
+    }
+  }
+
+  Future<void> _startRinging() async {
+    if (!_isRinging) {
+      try {
+        await _ringtonePlayer.play();
+        setState(() => _isRinging = true);
+      } catch (e) {
+        print('Error playing ringtone: $e');
+      }
+    }
+  }
+
+  Future<void> _stopRinging() async {
+    if (_isRinging) {
+      try {
+        await _ringtonePlayer.stop();
+        setState(() => _isRinging = false);
+      } catch (e) {
+        print('Error stopping ringtone: $e');
+      }
+    }
   }
 
   void _setupCallListener() {
-    _callSubscription = FirebaseDatabase.instance
-        .ref('calls/${widget.appointmentId}')
-        .onValue
+    _callStateSubscription = _callService
+        .listenToCallStatus(widget.callId)
         .listen((event) {
           if (event.snapshot.value == null) {
             Navigator.pop(context);
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text("Cuộc gọi đã kết thúc")),
-            );
             return;
           }
 
           final data = event.snapshot.value as Map<dynamic, dynamic>;
-          if (data['status'] == 'rejected' || data['status'] == 'ended') {
+          if (data['status'] == 'rejected' ||
+              data['status'] == 'ended' ||
+              data['status'] == 'missed') {
             Navigator.pop(context);
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text("Cuộc gọi đã kết thúc")),
-            );
           }
         });
   }
 
-  @override
-  void dispose() {
-    _callSubscription.cancel();
-    super.dispose();
+  Future<void> _acceptCall() async {
+    await _stopRinging();
+    // Kiểm tra quyền truy cập
+    final cameraStatus = await Permission.camera.request();
+    final micStatus = await Permission.microphone.request();
+
+    if (cameraStatus.isDenied || micStatus.isDenied) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Cần quyền truy cập camera và microphone')),
+      );
+      return;
+    }
+
+    await _callService.updateCallStatus(widget.callId, 'accepted');
+
+    if (mounted) {
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder:
+              (context) => CallScreen(
+                callId: widget.callId,
+                userId: FirebaseAuth.instance.currentUser!.uid,
+                isIncoming: true,
+                type: widget.type,
+              ),
+        ),
+      );
+    }
+  }
+
+  Future<void> _rejectCall() async {
+    await _stopRinging();
+    await _callService.updateCallStatus(widget.callId, 'rejected');
+    if (mounted) {
+      Navigator.pop(context);
+    }
   }
 
   @override
@@ -66,132 +171,108 @@ class _IncomingCallScreenState extends State<IncomingCallScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            const Spacer(flex: 1),
-            // Avatar và thông tin người gọi
-            Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                CircleAvatar(
-                  radius: 50,
-                  backgroundImage: NetworkImage(widget.callerAvatarUrl),
-                  backgroundColor: Colors.grey[300],
-                ),
-                const SizedBox(height: 24),
-                Text(
-                  widget.callerName,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 32,
-                    fontWeight: FontWeight.w500,
+            Spacer(),
+            // Animated avatar
+            AnimatedBuilder(
+              animation: _animationController,
+              builder: (context, child) {
+                return Transform.scale(
+                  scale: _scaleAnimation.value,
+                  child: Opacity(
+                    opacity: _opacityAnimation.value,
+                    child: CircleAvatar(
+                      radius: 50,
+                      backgroundImage: NetworkImage(widget.callerAvatar),
+                    ),
                   ),
+                );
+              },
+            ),
+            SizedBox(height: 20),
+            // Animated text
+            AnimatedBuilder(
+              animation: _animationController,
+              builder: (context, child) {
+                return Opacity(
+                  opacity: _opacityAnimation.value,
+                  child: Text(
+                    widget.callerName,
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 24,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                );
+              },
+            ),
+            Text('đang gọi...', style: TextStyle(color: Colors.white70)),
+            Spacer(),
+            // Call buttons with animation
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                _buildAnimatedCallButton(
+                  icon: Icons.call_end,
+                  color: Colors.red,
+                  onPressed: _rejectCall,
                 ),
-                const SizedBox(height: 8),
-                const Text(
-                  "đang gọi...",
-                  style: TextStyle(color: Colors.white70, fontSize: 19),
+                _buildAnimatedCallButton(
+                  icon: Icons.call,
+                  color: Colors.green,
+                  onPressed: _acceptCall,
                 ),
               ],
             ),
-            const Spacer(flex: 2),
-            // Các nút điều khiển cuộc gọi
-            Padding(
-              padding: const EdgeInsets.only(bottom: 50),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                children: [
-                  // Nút từ chối
-                  Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      GestureDetector(
-                        onTap: () async {
-                          try {
-                            await _signaling.rejectCall(widget.appointmentId);
-                            Navigator.pop(context);
-                          } catch (e) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                content: Text("Lỗi khi từ chối cuộc gọi: $e"),
-                              ),
-                            );
-                          }
-                        },
-                        child: Container(
-                          width: 64,
-                          height: 64,
-                          decoration: const BoxDecoration(
-                            color: Colors.red,
-                            shape: BoxShape.circle,
-                          ),
-                          child: const Icon(
-                            Icons.call_end,
-                            color: Colors.white,
-                            size: 32,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      const Text(
-                        "Từ chối",
-                        style: TextStyle(color: Colors.white, fontSize: 14),
-                      ),
-                    ],
-                  ),
-                  // Nút chấp nhận
-                  Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      GestureDetector(
-                        onTap: () async {
-                          try {
-                            await _signaling.acceptCall(widget.appointmentId);
-                            Navigator.pushReplacement(
-                              context,
-                              MaterialPageRoute(
-                                builder:
-                                    (context) => CallScreen(
-                                      friendId: widget.appointmentId,
-                                      friendName: widget.callerName,
-                                      friendAvatarUrl: widget.callerAvatarUrl,
-                                      appointmentId: widget.appointmentId,
-                                    ),
-                              ),
-                            );
-                          } catch (e) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                content: Text("Lỗi khi chấp nhận cuộc gọi: $e"),
-                              ),
-                            );
-                          }
-                        },
-                        child: Container(
-                          width: 64,
-                          height: 64,
-                          decoration: const BoxDecoration(
-                            color: Colors.green,
-                            shape: BoxShape.circle,
-                          ),
-                          child: const Icon(
-                            Icons.call,
-                            color: Colors.white,
-                            size: 32,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      const Text(
-                        "Chấp nhận",
-                        style: TextStyle(color: Colors.white, fontSize: 14),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
+            SizedBox(height: 50),
           ],
         ),
       ),
     );
+  }
+
+  Widget _buildAnimatedCallButton({
+    required IconData icon,
+    required Color color,
+    required VoidCallback onPressed,
+  }) {
+    return AnimatedBuilder(
+      animation: _animationController,
+      builder: (context, child) {
+        return Transform.scale(
+          scale: _scaleAnimation.value,
+          child: Container(
+            width: 64,
+            height: 64,
+            decoration: BoxDecoration(
+              color: color,
+              shape: BoxShape.circle,
+              boxShadow: [
+                BoxShadow(
+                  color: color.withOpacity(0.3),
+                  blurRadius: 10,
+                  spreadRadius: 2,
+                ),
+              ],
+            ),
+            child: IconButton(
+              icon: Icon(icon),
+              color: Colors.white,
+              onPressed: onPressed,
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  @override
+  void dispose() {
+    _callTimeout?.cancel();
+    _callStateSubscription?.cancel();
+    _ringtonePlayer.dispose();
+    _animationController.dispose();
+    _animationService.dispose();
+    super.dispose();
   }
 }

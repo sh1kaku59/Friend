@@ -33,24 +33,26 @@ dependencies:
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
-  cupertino_icons: ^1.0.8
+  cupertino_icons: any
+  flutter_vibrate: any
   
-  # Firebase packages - phiên bản tương thích với SDK 35
+  # Firebase packages
   firebase_core: any
   firebase_auth: any
   firebase_database: any
   firebase_storage: any
   cloud_firestore: any
   
-  # Media packages - phiên bản tương thích với NDK 25.1
-  flutter_webrtc: any  # Phiên bản ổn định với NDK 25.1
-  just_audio: any
+  # Media packages
+  just_audio: ^0.9.36 
   image_picker: any
+  livekit_client: ^2.4.7
   
-  # Utils - phiên bản tương thích với minSdk 23
+  # Utils
   permission_handler: any
   uuid: any
   rxdart: any
+  http: any
 
 dev_dependencies:
   flutter_test:

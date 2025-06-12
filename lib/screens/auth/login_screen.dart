@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import '../../services/auth_service.dart';
-import '../friend/friend_list_screen.dart'; // Import màn hình danh sách bạn bè
+// import '../friend/friend_list_screen.dart'; // Import màn hình danh sách bạn bè
 import '../main_screen.dart';
 
 class LoginScreen extends StatefulWidget {

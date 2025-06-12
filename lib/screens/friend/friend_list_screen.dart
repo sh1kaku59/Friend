@@ -7,12 +7,13 @@ import '../auth/login_screen.dart';
 import '../call/call_screen.dart';
 import 'view_profile.dart';
 import 'package:friend/screens/friend/notifications_screen.dart';
-import 'package:image_picker/image_picker.dart';
-import 'package:firebase_storage/firebase_storage.dart';
-import 'dart:io';
+// import 'package:image_picker/image_picker.dart';
+// import 'package:firebase_storage/firebase_storage.dart';
+// import 'dart:io';
 import 'success_dialog.dart';
-import '../../services/signaling.dart';
 import '../call/incoming_call_screen.dart';
+import 'package:permission_handler/permission_handler.dart';
+import '../../services/callservice.dart';
 
 class FriendListScreen extends StatefulWidget {
   const FriendListScreen({super.key});
@@ -37,9 +38,9 @@ class _FriendListScreenState extends State<FriendListScreen> {
   bool hasNewFriendRequest = false;
   // Thêm biến để lưu số lượng lời mời kết bạn
   int friendRequestCount = 0;
-  final Signaling _signaling = Signaling();
   final ScrollController _scrollController = ScrollController();
   final FocusNode _searchFocusNode = FocusNode(); // Thêm FocusNode
+  final CallService _callService = CallService();
 
   @override
   void initState() {
@@ -54,7 +55,7 @@ class _FriendListScreenState extends State<FriendListScreen> {
     }
     _listenForFriendRequests();
     _getFriends();
-    _listenForIncomingCalls();
+    _listenToIncomingCalls();
   }
 
   /// Lấy user ID hiện tại
@@ -195,33 +196,33 @@ class _FriendListScreenState extends State<FriendListScreen> {
   }
 
   /// **📤 Upload ảnh đại diện**
-  Future<void> _uploadAvatar() async {
-    final picker = ImagePicker();
-    final pickedFile = await picker.pickImage(source: ImageSource.gallery);
-    if (pickedFile == null || currentUserId == null) return;
+  // Future<void> _uploadAvatar() async {
+  //   final picker = ImagePicker();
+  //   final pickedFile = await picker.pickImage(source: ImageSource.gallery);
+  //   if (pickedFile == null || currentUserId == null) return;
 
-    final file = File(pickedFile.path);
-    final storageRef = FirebaseStorage.instance.ref().child(
-      "avatars/$currentUserId.jpg",
-    );
+  //   final file = File(pickedFile.path);
+  //   final storageRef = FirebaseStorage.instance.ref().child(
+  //     "avatars/$currentUserId.jpg",
+  //   );
 
-    // Upload file
-    await storageRef.putFile(file, SettableMetadata(contentType: "image/jpeg"));
+  //   // Upload file
+  //   await storageRef.putFile(file, SettableMetadata(contentType: "image/jpeg"));
 
-    // Lấy URL đầy đủ
-    final String downloadUrl = await storageRef.getDownloadURL();
-    debugPrint("Avatar URL: $downloadUrl"); // Debug URL
+  //   // Lấy URL đầy đủ
+  //   final String downloadUrl = await storageRef.getDownloadURL();
+  //   debugPrint("Avatar URL: $downloadUrl"); // Debug URL
 
-    // Cập nhật vào Firebase Database
-    await FirebaseDatabase.instance.ref().child("users/$currentUserId").update({
-      "avatar": downloadUrl,
-    });
+  //   // Cập nhật vào Firebase Database
+  //   await FirebaseDatabase.instance.ref().child("users/$currentUserId").update({
+  //     "avatar": downloadUrl,
+  //   });
 
-    // Cập nhật state để hiển thị ảnh mới
-    setState(() {
-      avatarUrl = downloadUrl;
-    });
-  }
+  //   // Cập nhật state để hiển thị ảnh mới
+  //   setState(() {
+  //     avatarUrl = downloadUrl;
+  //   });
+  // }
 
   /// **🚀 Stream lắng nghe danh sách bạn bè**
   Stream<List<UserModel>> getFriendsStream() {
@@ -331,106 +332,141 @@ class _FriendListScreenState extends State<FriendListScreen> {
   void _startCall(
     String friendId,
     String friendName,
-    String friendAvatarUrl,
+    String friendAvatar,
   ) async {
+    final callService = CallService();
+    final currentUserId = FirebaseAuth.instance.currentUser?.uid;
+
+    if (currentUserId == null) return;
+
     try {
-      await _signaling.initiateCall(
-        currentUserId!,
-        friendId,
-      ); // Sử dụng initiateCall thay vì startCall
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder:
-              (context) => CallScreen(
-                friendId: friendId,
-                friendName: friendName,
-                friendAvatarUrl: friendAvatarUrl,
-                appointmentId: _signaling.appointmentId!,
-              ),
-        ),
+      // Kiểm tra người dùng đang trong cuộc gọi khác
+      final isInCall = await callService.isUserInCall(currentUserId);
+      if (isInCall) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Bạn đang trong một cuộc gọi khác')),
+        );
+        return;
+      }
+
+      // Kiểm tra quyền camera và microphone
+      final cameraStatus = await Permission.camera.request();
+      final micStatus = await Permission.microphone.request();
+
+      if (cameraStatus.isDenied || micStatus.isDenied) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Cần quyền truy cập camera và microphone')),
+        );
+        return;
+      }
+
+      // Kiểm tra trạng thái online của người nhận
+      final receiverSnapshot =
+          await FirebaseDatabase.instance.ref('users/$friendId').get();
+
+      if (!receiverSnapshot.exists ||
+          (receiverSnapshot.value as Map)['online'] == false) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Người dùng không trực tuyến')));
+        return;
+      }
+
+      // Tạo cuộc gọi mới
+      final callId = await callService.initiateCall(
+        callerId: currentUserId,
+        receiverId: friendId,
+        type: 'video',
       );
+
+      // Chuyển đến màn hình cuộc gọi
+      if (mounted) {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder:
+                (context) => CallScreen(
+                  callId: callId,
+                  userId: currentUserId,
+                  isIncoming: false,
+                  type: 'video',
+                ),
+          ),
+        );
+      }
     } catch (e) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text("Lỗi khi bắt đầu cuộc gọi: $e")));
+      print('Error starting call: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Không thể bắt đầu cuộc gọi')));
+      }
     }
   }
 
-  /// Lắng nghe cuộc gọi đến
-  void _listenForIncomingCalls() {
+  /// Thêm kiểm tra cuộc gọi đang diễn ra
+  // Future<bool> _isInCall() async {
+  //   final callsSnapshot =
+  //       await FirebaseDatabase.instance
+  //           .ref('calls')
+  //           .orderByChild('status')
+  //           .equalTo('accepted')
+  //           .get();
+
+  //   if (callsSnapshot.exists) {
+  //     final calls = callsSnapshot.value as Map;
+  //     return calls.values.any(
+  //       (call) =>
+  //           (call['callerId'] == currentUserId ||
+  //               call['receiverId'] == currentUserId) &&
+  //           call['status'] == 'accepted',
+  //     );
+  //   }
+  //   return false;
+  // }
+
+  void _listenToIncomingCalls() {
+    final currentUserId = FirebaseAuth.instance.currentUser?.uid;
     if (currentUserId == null) return;
 
-    print("Bắt đầu lắng nghe cuộc gọi đến cho user: $currentUserId");
+    _callService.listenToIncomingCalls(currentUserId).listen((event) {
+      if (event.snapshot.value == null) return;
 
-    FirebaseDatabase.instance
-        .ref('calls')
-        .onValue
-        .listen(
-          (event) {
-            if (event.snapshot.value == null) {
-              print("Không có cuộc gọi nào");
-              return;
-            }
+      final calls = event.snapshot.value as Map<dynamic, dynamic>;
+      calls.forEach((callId, callData) {
+        if (callData['status'] == 'pending') {
+          _showIncomingCallScreen(
+            callId: callId,
+            callerId: callData['callerId'],
+            callerName: callData['callerName'],
+            callerAvatar: callData['callerAvatar'],
+            type: callData['type'],
+          );
+        }
+      });
+    });
+  }
 
-            final Map<dynamic, dynamic> calls =
-                event.snapshot.value as Map<dynamic, dynamic>;
-            print("Tìm thấy ${calls.length} cuộc gọi");
-
-            calls.forEach((callId, callData) {
-              print("Kiểm tra cuộc gọi: $callId");
-              print("Receiver ID: ${callData['receiverId']}");
-              print("Current User ID: $currentUserId");
-              print("Status: ${callData['status']}");
-
-              if (callData['receiverId'] == currentUserId &&
-                  callData['status'] == 'ringing') {
-                print("Tìm thấy cuộc gọi đến phù hợp!");
-
-                // Lấy thông tin người gọi từ Realtime Database
-                FirebaseDatabase.instance
-                    .ref("users/${callData['callerId']}")
-                    .get()
-                    .then((callerSnapshot) {
-                      if (callerSnapshot.exists) {
-                        final callerData =
-                            callerSnapshot.value as Map<dynamic, dynamic>;
-                        final callerName =
-                            callerData['username'] ?? 'Người gọi';
-                        final callerAvatarUrl = callerData['avatar'] ?? '';
-
-                        print("Chuyển đến màn hình IncomingCallScreen");
-                        print("Caller Name: $callerName");
-                        print("Caller Avatar: $callerAvatarUrl");
-                        print("Appointment ID: $callId");
-
-                        if (mounted) {
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder:
-                                  (context) => IncomingCallScreen(
-                                    callerName: callerName,
-                                    callerAvatarUrl: callerAvatarUrl,
-                                    appointmentId: callId,
-                                  ),
-                            ),
-                          );
-                        }
-                      } else {
-                        print("Không tìm thấy thông tin người gọi");
-                      }
-                    })
-                    .catchError((error) {
-                      print("Lỗi khi lấy thông tin người gọi: $error");
-                    });
-              }
-            });
-          },
-          onError: (error) {
-            print("Lỗi khi lắng nghe cuộc gọi: $error");
-          },
-        );
+  void _showIncomingCallScreen({
+    required String callId,
+    required String callerId,
+    required String callerName,
+    required String callerAvatar,
+    required String type,
+  }) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder:
+            (context) => IncomingCallScreen(
+              callId: callId,
+              callerId: callerId,
+              callerName: callerName,
+              callerAvatar: callerAvatar,
+              type: type,
+            ),
+      ),
+    );
   }
 
   /// **🚫 Chặn người dùng**
