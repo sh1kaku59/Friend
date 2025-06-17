@@ -42,6 +42,10 @@ class _FriendListScreenState extends State<FriendListScreen> {
   final FocusNode _searchFocusNode = FocusNode(); // Thêm FocusNode
   final CallService _callService = CallService();
 
+  // Thêm một Map để theo dõi các cuộc gọi đến đang hiển thị IncomingCallScreen
+  // Điều này giúp tránh việc đẩy nhiều IncomingCallScreen cho cùng một cuộc gọi
+  final Map<String, bool> _activeIncomingCallScreens = {};
+
   @override
   void initState() {
     super.initState();
@@ -346,6 +350,21 @@ class _FriendListScreenState extends State<FriendListScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Bạn đang trong một cuộc gọi khác')),
         );
+        print(
+          'DEBUG: User $currentUserId is already in a call. Cannot initiate new call.',
+        );
+        return;
+      }
+
+      // Kiểm tra người nhận đang trong cuộc gọi khác
+      final isReceiverInCall = await callService.isUserInCall(friendId);
+      if (isReceiverInCall) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Người nhận đang trong một cuộc gọi khác')),
+        );
+        print(
+          'DEBUG: Receiver $friendId is already in a call. Cannot initiate new call.',
+        );
         return;
       }
 
@@ -357,6 +376,7 @@ class _FriendListScreenState extends State<FriendListScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Cần quyền truy cập camera và microphone')),
         );
+        print('DEBUG: Camera/Mic permissions denied for initiating call.');
         return;
       }
 
@@ -369,6 +389,7 @@ class _FriendListScreenState extends State<FriendListScreen> {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text('Người dùng không trực tuyến')));
+        print('DEBUG: Receiver $friendId is not online. Cannot initiate call.');
         return;
       }
 
@@ -378,9 +399,11 @@ class _FriendListScreenState extends State<FriendListScreen> {
         receiverId: friendId,
         type: 'video',
       );
+      print('DEBUG: Call initiated with ID: $callId');
 
-      // Chuyển đến màn hình cuộc gọi
+      // Chuyển đến màn hình cuộc gọi (cho người gọi)
       if (mounted) {
+        print('DEBUG: Navigating to CallScreen from FriendListScreen.');
         Navigator.push(
           context,
           MaterialPageRoute(
@@ -390,12 +413,14 @@ class _FriendListScreenState extends State<FriendListScreen> {
                   userId: currentUserId,
                   isIncoming: false,
                   type: 'video',
+                  remoteParticipantName: friendName,
+                  remoteParticipantAvatar: friendAvatar,
                 ),
           ),
         );
       }
     } catch (e) {
-      print('Error starting call: $e');
+      print('ERROR: Error starting call from FriendListScreen: $e');
       if (mounted) {
         ScaffoldMessenger.of(
           context,
@@ -403,27 +428,6 @@ class _FriendListScreenState extends State<FriendListScreen> {
       }
     }
   }
-
-  /// Thêm kiểm tra cuộc gọi đang diễn ra
-  // Future<bool> _isInCall() async {
-  //   final callsSnapshot =
-  //       await FirebaseDatabase.instance
-  //           .ref('calls')
-  //           .orderByChild('status')
-  //           .equalTo('accepted')
-  //           .get();
-
-  //   if (callsSnapshot.exists) {
-  //     final calls = callsSnapshot.value as Map;
-  //     return calls.values.any(
-  //       (call) =>
-  //           (call['callerId'] == currentUserId ||
-  //               call['receiverId'] == currentUserId) &&
-  //           call['status'] == 'accepted',
-  //     );
-  //   }
-  //   return false;
-  // }
 
   void _listenToIncomingCalls() {
     final currentUserId = FirebaseAuth.instance.currentUser?.uid;
@@ -434,13 +438,27 @@ class _FriendListScreenState extends State<FriendListScreen> {
 
       final calls = event.snapshot.value as Map<dynamic, dynamic>;
       calls.forEach((callId, callData) {
-        if (callData['status'] == 'pending') {
+        // Chỉ hiển thị IncomingCallScreen nếu nó chưa được hiển thị cho cuộc gọi này
+        if (callData['status'] == 'pending' &&
+            !_activeIncomingCallScreens.containsKey(callId)) {
+          print(
+            'DEBUG: Incoming call detected: $callId. Showing IncomingCallScreen.',
+          );
+          _activeIncomingCallScreens[callId] =
+              true; // Đánh dấu là đang hiển thị
           _showIncomingCallScreen(
             callId: callId,
             callerId: callData['callerId'],
             callerName: callData['callerName'],
             callerAvatar: callData['callerAvatar'],
             type: callData['type'],
+          );
+        } else if (callData['status'] != 'pending' &&
+            _activeIncomingCallScreens.containsKey(callId)) {
+          // Nếu cuộc gọi không còn pending, xóa khỏi danh sách đang hoạt động
+          _activeIncomingCallScreens.remove(callId);
+          print(
+            'DEBUG: Incoming call $callId status changed to ${callData['status']}. Removing from active screens.',
           );
         }
       });
@@ -466,7 +484,13 @@ class _FriendListScreenState extends State<FriendListScreen> {
               type: type,
             ),
       ),
-    );
+    ).then((_) {
+      // Khi IncomingCallScreen bị pop, xóa khỏi danh sách đang hoạt động
+      print(
+        'DEBUG: IncomingCallScreen for $callId was popped. Removing from active screens.',
+      );
+      _activeIncomingCallScreens.remove(callId);
+    });
   }
 
   /// **🚫 Chặn người dùng**

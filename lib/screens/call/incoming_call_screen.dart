@@ -7,6 +7,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import '../../services/callservice.dart';
 import 'package:just_audio/just_audio.dart';
 import '../../services/call_animation_service.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 
 class IncomingCallScreen extends StatefulWidget {
   final String callId;
@@ -46,12 +47,29 @@ class _IncomingCallScreenState extends State<IncomingCallScreen>
     _initializeRingtone();
     _setupCallListener();
     _initializeAnimations();
-    _startIncomingCallEffects();
-    // Tự động từ chối sau 30 giây
-    _callTimeout = Timer(Duration(seconds: 30), () {
+    if (!kIsWeb) {
+      _startIncomingCallEffects();
+    }
+    _callTimeout = Timer(Duration(seconds: 30), () async {
       if (mounted) {
-        _callService.updateCallStatus(widget.callId, 'rejected');
-        Navigator.pop(context);
+        print(
+          'DEBUG: Incoming call timeout. Checking call status on Firebase.',
+        );
+        final currentCallStatus = await _callService.getCallStatus(
+          widget.callId,
+        );
+        if (currentCallStatus['status'] == 'pending') {
+          print(
+            'DEBUG: Call ${widget.callId} is still pending. Updating to missed.',
+          );
+          await _callService.updateCallStatus(widget.callId, 'missed');
+        }
+        _stopRinging();
+        _callStateSubscription?.cancel();
+        if (mounted) {
+          Navigator.pop(context);
+          print('DEBUG: Popped IncomingCallScreen due to timeout.');
+        }
       }
     });
   }
@@ -108,39 +126,85 @@ class _IncomingCallScreenState extends State<IncomingCallScreen>
   }
 
   void _setupCallListener() {
-    _callStateSubscription = _callService
-        .listenToCallStatus(widget.callId)
-        .listen((event) {
-          if (event.snapshot.value == null) {
-            Navigator.pop(context);
-            return;
-          }
+    _callStateSubscription = _callService.listenToCallStatus(widget.callId).listen((
+      event,
+    ) {
+      if (!mounted) {
+        print(
+          'DEBUG: _setupCallListener received event but widget not mounted. Cancelling listener.',
+        );
+        _callStateSubscription
+            ?.cancel(); // Đảm bảo hủy nếu widget không còn mounted
+        return;
+      }
 
-          final data = event.snapshot.value as Map<dynamic, dynamic>;
-          if (data['status'] == 'rejected' ||
-              data['status'] == 'ended' ||
-              data['status'] == 'missed') {
-            Navigator.pop(context);
-          }
-        });
+      if (event.snapshot.value == null) {
+        print(
+          'DEBUG: Call status listener: Call entry disappeared from Firebase. Popping screen.',
+        );
+        _callStateSubscription?.cancel(); // Hủy ngay lập tức
+        Navigator.pop(context);
+        return;
+      }
+
+      final data = event.snapshot.value as Map<dynamic, dynamic>;
+      print(
+        'DEBUG: Call status listener: Received status: ${data['status']} for callId: ${widget.callId}',
+      );
+
+      // Nếu trạng thái cuộc gọi không còn là pending (hoặc accepted), pop màn hình
+      if (data['status'] == 'rejected' ||
+          data['status'] == 'ended' ||
+          data['status'] == 'missed' ||
+          data['status'] == 'cancelled') {
+        print(
+          'DEBUG: Call status listener: Status is ${data['status']}. Popping IncomingCallScreen.',
+        );
+        _callStateSubscription?.cancel(); // Hủy ngay lập tức
+        Navigator.pop(context);
+      }
+    });
   }
 
   Future<void> _acceptCall() async {
+    print('DEBUG: _acceptCall called. CallId: ${widget.callId}');
     await _stopRinging();
+    _callTimeout?.cancel(); // Hủy timeout ngay lập tức
+
+    // HUY LISTENER NGAY LẬP TỨC TRƯỚC KHI ĐIỀU HƯỚNG
+    _callStateSubscription?.cancel();
+    _callStateSubscription = null; // Đảm bảo biến được set về null
+
     // Kiểm tra quyền truy cập
     final cameraStatus = await Permission.camera.request();
     final micStatus = await Permission.microphone.request();
 
     if (cameraStatus.isDenied || micStatus.isDenied) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Cần quyền truy cập camera và microphone')),
+        SnackBar(
+          content: Text(
+            'Cần quyền truy cập camera và microphone để thực hiện cuộc gọi',
+          ),
+          action: SnackBarAction(
+            label: 'Cài đặt',
+            onPressed: () => openAppSettings(),
+          ),
+        ),
       );
+      print('DEBUG: Camera/Mic permissions denied. Cannot accept call.');
+      // Nếu quyền bị từ chối, cập nhật trạng thái cuộc gọi là rejected và pop màn hình
+      await _callService.updateCallStatus(widget.callId, 'rejected');
+      if (mounted) {
+        Navigator.pop(context);
+      }
       return;
     }
 
     await _callService.updateCallStatus(widget.callId, 'accepted');
+    print('DEBUG: Call status updated to "accepted" in Firebase.');
 
     if (mounted) {
+      print('DEBUG: Navigating to CallScreen (replacing IncomingCallScreen).');
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(
@@ -150,6 +214,8 @@ class _IncomingCallScreenState extends State<IncomingCallScreen>
                 userId: FirebaseAuth.instance.currentUser!.uid,
                 isIncoming: true,
                 type: widget.type,
+                remoteParticipantName: widget.callerName,
+                remoteParticipantAvatar: widget.callerAvatar,
               ),
         ),
       );
@@ -157,10 +223,17 @@ class _IncomingCallScreenState extends State<IncomingCallScreen>
   }
 
   Future<void> _rejectCall() async {
+    print('DEBUG: _rejectCall called. CallId: ${widget.callId}');
     await _stopRinging();
+    _callTimeout?.cancel(); // Hủy timeout
+    _callStateSubscription?.cancel(); // Hủy listener ngay lập tức
+    _callStateSubscription = null;
+
     await _callService.updateCallStatus(widget.callId, 'rejected');
+    print('DEBUG: Call status updated to "rejected" in Firebase.');
     if (mounted) {
       Navigator.pop(context);
+      print('DEBUG: Popped IncomingCallScreen after rejecting.');
     }
   }
 
@@ -268,8 +341,11 @@ class _IncomingCallScreenState extends State<IncomingCallScreen>
 
   @override
   void dispose() {
+    print(
+      'DEBUG: IncomingCallScreen dispose() called for CallId: ${widget.callId}.',
+    );
     _callTimeout?.cancel();
-    _callStateSubscription?.cancel();
+    _callStateSubscription?.cancel(); // Đảm bảo hủy listener
     _ringtonePlayer.dispose();
     _animationController.dispose();
     _animationService.dispose();

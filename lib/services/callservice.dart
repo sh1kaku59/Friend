@@ -41,17 +41,18 @@ class CallService {
     required String receiverId,
     required String type,
   }) async {
+    print('DEBUG: Initiating call from $callerId to $receiverId.');
     try {
       // Kiểm tra xem có cuộc gọi đang diễn ra không
-      final existingCall =
+      final existingCallSnapshot =
           await _database
               .child('calls')
               .orderByChild('status')
               .equalTo('accepted')
               .get();
 
-      if (existingCall.exists) {
-        final calls = existingCall.value as Map;
+      if (existingCallSnapshot.exists) {
+        final calls = existingCallSnapshot.value as Map;
         final hasActiveCall = calls.values.any(
           (call) =>
               (call['callerId'] == callerId ||
@@ -60,6 +61,9 @@ class CallService {
         );
 
         if (hasActiveCall) {
+          print(
+            'DEBUG: User $callerId is already in an active call. Aborting initiateCall.',
+          );
           throw Exception('User is already in a call');
         }
       }
@@ -79,22 +83,25 @@ class CallService {
         'callerName': callerInfo['username'],
         'callerAvatar': callerInfo['avatar'] ?? '',
       });
+      print('DEBUG: Call $callId created with status "pending".');
 
       // Cập nhật trạng thái người gọi
       await _database.child('users/$callerId').update({
         'inCall': true,
         'lastOnline': ServerValue.timestamp,
       });
+      print('DEBUG: Caller $callerId inCall status set to true.');
 
       return callId;
     } catch (e) {
-      print('Error initiating call: $e');
+      print('ERROR: Error initiating call: $e');
       throw Exception('Failed to initiate call');
     }
   }
 
   // Cập nhật trạng thái cuộc gọi
   Future<void> updateCallStatus(String callId, String status) async {
+    print('DEBUG: Updating call status for $callId to "$status".');
     await _database.child('calls/$callId').update({
       'status': status,
       if (status == 'ended') 'endTime': ServerValue.timestamp,
@@ -174,12 +181,13 @@ class CallService {
       final callerId = callData['callerId'];
       final receiverId = callData['receiverId'];
 
+      // Cập nhật trạng thái cuộc gọi
       await _database.child('calls/$callId').update({
         'status': 'ended',
         'endTime': ServerValue.timestamp,
       });
 
-      // Đảm bảo cập nhật trạng thái inCall của cả hai người dùng
+      // Cập nhật trạng thái người dùng
       await Future.wait([
         _database.child('users/$callerId').update({
           'inCall': false,
@@ -191,7 +199,7 @@ class CallService {
         }),
       ]);
 
-      // Xóa cuộc gọi sau 5 phút (có thể điều chỉnh thời gian này)
+      // Xóa cuộc gọi sau 5 phút
       Future.delayed(Duration(minutes: 5), () async {
         await _database.child('calls/$callId').remove();
       });
@@ -221,5 +229,22 @@ class CallService {
           (call['callerId'] == userId || call['receiverId'] == userId) &&
           call['status'] == 'accepted',
     );
+  }
+
+  Future<void> handleCallTimeout(String callId) async {
+    final callSnapshot = await _database.child('calls/$callId').get();
+    if (!callSnapshot.exists) return;
+
+    final callData = callSnapshot.value as Map<dynamic, dynamic>;
+    if (callData['status'] == 'pending') {
+      await updateCallStatus(callId, 'missed');
+      await handleCallEnded(callId);
+    }
+  }
+
+  Future<Map<String, dynamic>> getCallStatus(String callId) async {
+    final snapshot = await _database.child('calls/$callId').get();
+    if (!snapshot.exists) return {};
+    return Map<String, dynamic>.from(snapshot.value as Map);
   }
 }
