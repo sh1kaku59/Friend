@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "766824097142",
+    "firebase_url": "https://meeting-app-77c2d-default-rtdb.asia-southeast1.firebasedatabase.app",
+    "project_id": "meeting-app-77c2d",
+    "storage_bucket": "meeting-app-77c2d.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:766824097142:android:6ea9dada3d1dfb63fc4657",
+        "android_client_info": {
+          "package_name": "com.example.meeting_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCat-F9d9hXC97LLXqFJJFGsEe8ubgOq64"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

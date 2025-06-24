@@ -13,7 +13,7 @@ import 'package:friend/screens/friend/notifications_screen.dart';
 import 'success_dialog.dart';
 import '../call/incoming_call_screen.dart';
 import 'package:permission_handler/permission_handler.dart';
-import '../../services/callservice.dart';
+import '../../services/call_service.dart';
 
 class FriendListScreen extends StatefulWidget {
   const FriendListScreen({super.key});
